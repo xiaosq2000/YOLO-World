@@ -103,8 +103,6 @@ venv.bak/
 
 # mypy
 .mypy_cache/
-# data/
-# data
 .vscode
 .idea
 .DS_Store
@@ -127,3 +125,12 @@ venus_run.sh
 
 # pixi environments
 .pixi
+
+# data
+data
+*input*
+*output*
+
+# LLM
+.aider*
+.cursor*
