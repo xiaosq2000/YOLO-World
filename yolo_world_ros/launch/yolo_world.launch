@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- YOLO-World ROS Node -->
+    <node name="yolo_world_ros" pkg="yolo_world_ros" type="yolo_world_node.py" output="screen">
+        <!-- 
+            Paths to model configuration and checkpoint file. 
+            This launch file assumes that the 'yolo_world_ros' package is located
+            at the root of the YOLO-World repository.
+        -->
+        <param name="config_file"
+            value="$(find yolo_world_ros)/../configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" />
+        <param name="checkpoint_file"
+            value="$(find yolo_world_ros)/../weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" />
+
+        <!-- Inference Parameters -->
+        <param name="text_prompts" value="arrow, person" />
+        <param name="score_threshold" value="0.05" />
+        <param name="top_k" value="100" />
+        <param name="device" value="cuda:0" />
+        <param name="use_amp" value="false" />
+
+        <!-- Topics -->
+        <param name="input_image_topic" value="/camera/rgb/image_raw" />
+        <param name="output_detections_topic" value="/yolo_world/detections" />
+
+        <!-- Visualization Parameters -->
+        <param name="visualize" value="true" />
+        <param name="annotated_image_topic" value="/yolo_world/annotated_image" />
+    </node>
+</launch>
