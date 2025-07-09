@@ -1,60 +1,62 @@
 [workspace]
 authors = ["Tencent AILab <ronnysong@tencent.com>"]
 channels = ["nvidia/label/cuda-11.8.0", "conda-forge"]
+description = "YOLO-World: Real-time Open Vocabulary Object Detection"
+license-file = "LICENSE"
 name = "YOLO-World"
 platforms = ["linux-64"]
-version = "0.1.0"
-description = "YOLO-World: Real-time Open Vocabulary Object Detection"
 readme = "README.md"
-license-file = "LICENSE"
+version = "0.1.0"
 [system-requirements]
 cuda = "11.8"
 [dependencies]
-cuda = "11.8.0.*"
-python = "3.11.*"
 cmake = ">=3.31.6,<4"
-opencv = ">=4.12.0,<5"
-supervision = "==0.19.0"
-transformers = ">=4.53.1,<5"
-tokenizers = ">=0.21.3,<0.22"
-wheel = ">=0.45.1,<0.46"
-ninja = ">=1.13.0,<2"
-pybind11 = ">=2.13.6,<3"
-uv = ">=0.7.19,<0.8"
-setuptools = ">=80.9.0,<81"
+cuda = "11.8.0.*"
 gcc = "<12"
 gxx = "<12"
+ninja = ">=1.13.0,<2"
 numpy = "<2"
+opencv = ">=4.12.0,<5"
 psutil = ">=7.0.0,<8"
+pybind11 = ">=2.13.6,<3"
+python = "3.11.*"
+setuptools = ">=80.9.0,<81"
+supervision = "==0.19.0"
+tokenizers = ">=0.21.3,<0.22"
+transformers = ">=4.53.1,<5"
+uv = ">=0.7.19,<0.8"
+wheel = ">=0.45.1,<0.46"
 [pypi-dependencies]
-torch = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
-torchaudio = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
-torchvision = { version = "==0.21.0", index = "https://download.pytorch.org/whl/cu118" }
+gradio = ">=5.35.0, <6"
+lvis = ">=0.5.3, <0.6"
 mmengine = { git = "https://github.com/open-mmlab/mmengine" }
 onnx = ">=1.18.0, <2"
 onnxruntime = ">=1.22.0, <2"
 onnxsim = ">=0.4.36, <0.5"
-lvis = ">=0.5.3, <0.6"
-gradio = ">=5.35.0, <6"
+torch = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
+torchaudio = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
+torchvision = { version = "==0.21.0", index = "https://download.pytorch.org/whl/cu118" }
 [activation]
 env = { LD_LIBRARY_PATH = "$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$CONDA_PREFIX/lib:$LD_LIBRARY_PATH:$LD_LIBRARY_PATH", CUDA_HOME = "${CONDA_PREFIX}" }
 [tasks]
+demo = { cmd = "python ./demo/image_demo.py {{ config }} {{ weight }} {{ inputs_dir }} {{ text_prompt }} --output-dir {{ outputs_dir }} --topk 100 --threshold 0.005", args = [
+    { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
+    { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
+    { "arg" = "inputs_dir", "default" = "./demo/sample_images" },
+    { "arg" = "text_prompt", "default" = "'person,dog,cat'" },
+    { "arg" = "outputs_dir", "default" = "./demo_output" },
+] }
+demo-gradio = { cmd = "python ./demo/gradio_demo.py {{ config }} {{ weight }}", args = [
+    { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
+    { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
+] }
+download-lvis-minival-annotation-file = { cmd = "mkdir -p data/coco/lvis && cd data/coco/lvis && wget https://huggingface.co/GLIPModel/GLIP/resolve/main/lvis_v1_minival_inserted_image_name.json" }
 postinstall = { cmd = "uv pip install --no-build-isolation --no-deps -e .", depends-on = [
-  "postinstall-mmcv",
-  "postinstall-mmdetection",
-  "postinstall-mmyolo",
+    "postinstall-mmcv",
+    "postinstall-mmdetection",
+    "postinstall-mmyolo",
+    "download-lvis-minival-annotation-file",
 ] }
 postinstall-mmcv = { cwd = "./third_party/mmcv", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
 postinstall-mmdetection = { cwd = "./third_party/mmdetection", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
 postinstall-mmyolo = { cwd = "./third_party/mmyolo", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
-demo = { cmd = "python ./demo/image_demo.py {{ config }} {{ weight }} {{ inputs_dir }} {{ text_prompt }} --output-dir {{ outputs_dir }} --topk 100 --threshold 0.005", args = [
-  { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
-  { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
-  { "arg" = "inputs_dir", "default" = "./demo/sample_images" },
-  { "arg" = "text_prompt", "default" = "'person,dog,cat'" },
-  { "arg" = "outputs_dir", "default" = "./demo_output" },
-] }
-demo-gradio = { cmd = "python ./demo/gradio_demo.py {{ config }} {{ weight }}", args = [
-  { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
-  { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
-] }
