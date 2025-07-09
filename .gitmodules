@@ -1,3 +1,9 @@
 [submodule "third_party/mmyolo"]
 	path = third_party/mmyolo
 	url = https://github.com/onuralpszr/mmyolo.git
+[submodule "third_party/mmcv"]
+	path = third_party/mmcv
+	url = https://github.com/open-mmlab/mmcv
+[submodule "third_party/mmdetection"]
+	path = third_party/mmdetection
+	url = https://github.com/open-mmlab/mmdetection

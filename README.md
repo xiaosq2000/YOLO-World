@@ -162,7 +162,6 @@ We evaluate all YOLO-World-V2.1 models on LVIS, LVIS-mini, and COCO in the zero-
 * PT: Pre-training, CPT: continuing pre-training
 * CC-LiteV2: the newly-annotated CC3M subset, including 250k images.
 
-
 ## Getting started
 
 ### 1. Installation
@@ -174,7 +173,20 @@ YOLO-World is developed based on `torch==1.11.0` `mmyolo==0.6.0` and `mmdetectio
 ```bash
 git clone --recursive https://github.com/AILab-CVC/YOLO-World.git
 ```
-#### Install
+
+#### Install (using [`pixi`](https://pixi.sh/latest/))
+
+```sh
+# Install pixi
+curl -fsSL https://pixi.sh/install.sh | sh
+```
+
+```sh
+# After refreshing your current shell or in a new shell:
+pixi run postinstall
+```
+
+#### Install (using `pip`)
 
 ```bash
 pip install torch wheel -q
