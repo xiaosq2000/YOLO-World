@@ -94,6 +94,7 @@ class YOLOWorldDetector(YOLODetector):
         if txt_feats is not None:
             # forward image only
             img_feats = self.backbone.forward_image(batch_inputs)
+            txt_masks = None
         else:
             img_feats, (txt_feats,
                         txt_masks) = self.backbone(batch_inputs, texts)
