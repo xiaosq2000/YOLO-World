@@ -13,18 +13,11 @@
             value="$(find yolo_world_ros)/../weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" />
 
         <!-- Inference Parameters -->
-        <param name="text_prompts" value="arrow, person" />
-        <param name="score_threshold" value="0.05" />
-        <param name="top_k" value="100" />
         <param name="device" value="cuda:0" />
-        <param name="use_amp" value="false" />
 
         <!-- Topics -->
         <param name="input_image_topic" value="/camera/rgb/image_raw" />
         <param name="output_detections_topic" value="/yolo_world/detections" />
-
-        <!-- Visualization Parameters -->
-        <param name="visualize" value="true" />
         <param name="annotated_image_topic" value="/yolo_world/annotated_image" />
     </node>
 </launch>

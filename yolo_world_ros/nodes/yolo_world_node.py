@@ -24,6 +24,7 @@ import numpy as np
 import rospy
 import supervision as sv
 import torch
+from dynamic_reconfigure.server import Server
 from mmdet.apis import init_detector
 from mmdet.utils import get_test_pipeline_cfg
 from mmengine.config import Config
@@ -31,6 +32,7 @@ from mmengine.dataset import Compose
 from mmengine.runner.amp import autocast
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
+from yolo_world_ros.cfg import YOLOWorldConfig
 
 
 class YOLOWorldROS:
@@ -46,19 +48,20 @@ class YOLOWorldROS:
         """
         rospy.loginfo("Initializing YOLO-World ROS node...")
 
-        # Get parameters from ROS parameter server
+        # Get static parameters from ROS parameter server
         self.config_file = rospy.get_param("~config_file")
         self.checkpoint_file = rospy.get_param("~checkpoint_file")
-        self.text_prompts = rospy.get_param("~text_prompts", "person,dog,cat")
-        self.score_threshold = rospy.get_param("~score_threshold", 0.05)
-        self.top_k = rospy.get_param("~top_k", 100)
         self.device = rospy.get_param("~device", "cuda:0")
-        self.use_amp = rospy.get_param("~use_amp", False)
         input_image_topic = rospy.get_param("~input_image_topic", "/camera/rgb/image_raw")
         output_detections_topic = rospy.get_param(
             "~output_detections_topic", "/yolo_world/detections"
         )
-        self.visualize = rospy.get_param("~visualize", False)
+        annotated_image_topic = rospy.get_param(
+            "~annotated_image_topic", "/yolo_world/annotated_image"
+        )
+
+        # Initialize dynamic parameters
+        self.text_prompts = None
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -70,9 +73,8 @@ class YOLOWorldROS:
         test_pipeline_cfg[0]["type"] = "mmdet.LoadImageFromNDArray"
         self.test_pipeline = Compose(test_pipeline_cfg)
 
-        # Prepare text prompts and reparameterize the model
-        self.texts = [[t.strip()] for t in self.text_prompts.split(",")] + [[" "]]
-        self.model.reparameterize(self.texts)
+        # Set up dynamic reconfigure
+        self.reconfigure_server = Server(YOLOWorldConfig, self.reconfigure_callback)
 
         # Initialize ROS components
         self.detection_pub = rospy.Publisher(
@@ -82,19 +84,30 @@ class YOLOWorldROS:
             input_image_topic, Image, self.image_callback, queue_size=1, buff_size=2**24
         )
 
-        if self.visualize:
-            annotated_image_topic = rospy.get_param(
-                "~annotated_image_topic", "/yolo_world/annotated_image"
-            )
-            self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
-            # Rose-pine inspired colors
-            rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
-            self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
-            self.box_annotator = sv.BoxAnnotator(color=self.color_palette)
-            self.label_annotator = sv.LabelAnnotator(color=self.color_palette)
+        self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
+        # Rose-pine inspired colors
+        rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
+        self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
+        self.box_annotator = sv.BoxAnnotator(color=self.color_palette)
+        self.label_annotator = sv.LabelAnnotator(color=self.color_palette)
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
-        rospy.loginfo(f"Detecting classes: {self.text_prompts}")
+
+    def reconfigure_callback(self, config, level):
+        """
+        Callback for dynamic reconfigure server.
+        """
+        if self.text_prompts != config.text_prompts:
+            rospy.loginfo(f"Updating text prompts to: '{config.text_prompts}'")
+            self.text_prompts = config.text_prompts
+            self.texts = [[t.strip()] for t in self.text_prompts.split(",")] + [[" "]]
+            self.model.reparameterize(self.texts)
+
+        self.score_threshold = config.score_threshold
+        self.top_k = config.top_k
+        self.use_amp = config.use_amp
+        self.visualize = config.visualize
+        return config
 
     def image_callback(self, msg):
         """
