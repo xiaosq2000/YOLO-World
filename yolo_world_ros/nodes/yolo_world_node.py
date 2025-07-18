@@ -17,6 +17,7 @@
 #
 
 import os
+import json
 
 import cv2
 import git
@@ -62,6 +63,9 @@ class YOLOWorldROS:
 
         # Initialize dynamic parameters
         self.text_prompts = None
+        self.text_prompt_file = None
+        self.use_manual_prompts = None
+        self.texts = [[" "]]
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -97,10 +101,56 @@ class YOLOWorldROS:
         """
         Callback for dynamic reconfigure server.
         """
-        if self.text_prompts != config.text_prompts:
-            rospy.loginfo(f"Updating text prompts to: '{config.text_prompts}'")
-            self.text_prompts = config.text_prompts
-            self.texts = [[t.strip()] for t in self.text_prompts.split(",")] + [[" "]]
+        texts_changed = False
+        if config.use_manual_prompts:
+            if self.use_manual_prompts is not True or self.text_prompts != config.text_prompts:
+                rospy.loginfo(f"Using manual prompts: '{config.text_prompts}'")
+                self.texts = [[t.strip()] for t in config.text_prompts.split(",")] + [[" "]]
+                self.text_prompts = config.text_prompts
+                texts_changed = True
+        else:  # Use file for prompts
+            if (
+                self.use_manual_prompts is not False
+                or self.text_prompt_file != config.text_prompt_file
+            ):
+                if config.text_prompt_file and os.path.isfile(config.text_prompt_file):
+                    rospy.loginfo(f"Using prompts from file: '{config.text_prompt_file}'")
+                    try:
+                        file_path = config.text_prompt_file
+                        new_texts = None
+                        if file_path.endswith(".txt"):
+                            with open(file_path, "r") as f:
+                                lines = f.readlines()
+                            new_texts = [[t.rstrip("\r\n")] for t in lines] + [[" "]]
+                        elif file_path.endswith(".json"):
+                            with open(file_path, "r") as f:
+                                loaded_json = json.load(f)
+                            new_texts = [[item[0]] for item in loaded_json if item] + [[" "]]
+                        else:
+                            rospy.logwarn(
+                                f"Unsupported prompt file format: {file_path}. "
+                                "Only .txt and .json are supported. Not updating prompts."
+                            )
+
+                        if new_texts is not None:
+                            self.texts = new_texts
+                            texts_changed = True
+
+                        self.text_prompt_file = config.text_prompt_file
+                    except Exception as e:
+                        rospy.logerr(f"Error reading prompt file '{config.text_prompt_file}': {e}")
+                elif config.text_prompt_file:
+                    rospy.logwarn(
+                        f"Prompt file not found: {config.text_prompt_file}. Using previous prompts."
+                    )
+                    self.text_prompt_file = config.text_prompt_file
+                else:  # empty path
+                    rospy.logwarn("Prompt file path is empty. Using previous prompts.")
+                    self.text_prompt_file = config.text_prompt_file
+
+        self.use_manual_prompts = config.use_manual_prompts
+
+        if texts_changed:
             self.model.reparameterize(self.texts)
 
         self.score_threshold = config.score_threshold

@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
 <launch>
+    <arg name="input_image_topic" default="/camera/rgb/image_raw" />
     <!-- YOLO-World ROS Node -->
     <node name="yolo_world_ros" pkg="yolo_world_ros" type="yolo_world_node.py" output="screen">
         <!-- 
@@ -16,7 +17,7 @@
         <param name="device" value="cuda:0" />
 
         <!-- Topics -->
-        <param name="input_image_topic" value="/camera/rgb/image_raw" />
+        <param name="input_image_topic" value="$(arg input_image_topic)" />
         <param name="output_detections_topic" value="/yolo_world/detections" />
         <param name="annotated_image_topic" value="/yolo_world/annotated_image" />
     </node>
