@@ -1,6 +1,6 @@
 [workspace]
 authors = ["Tencent AILab <ronnysong@tencent.com>"]
-channels = ["nvidia/label/cuda-11.8.0", "conda-forge"]
+channels = ["nvidia/label/cuda-12.6.0", "conda-forge"]
 description = "YOLO-World: Real-time Open Vocabulary Object Detection"
 license-file = "LICENSE"
 name = "YOLO-World"
@@ -8,37 +8,49 @@ platforms = ["linux-64"]
 readme = "README.md"
 version = "0.1.0"
 [system-requirements]
-cuda = "11.8"
+cuda = "12.6"
 [dependencies]
-cmake = ">=3.31.6,<4"
-cuda = "11.8.0.*"
-gcc = "<12"
-gxx = "<12"
-ninja = ">=1.13.0,<2"
-numpy = "<2"
-opencv = ">=4.12.0,<5"
-psutil = ">=7.0.0,<8"
-pybind11 = ">=2.13.6,<3"
+# python
 python = "3.11.*"
 setuptools = ">=80.9.0,<81"
-supervision = "==0.19.0"
+uv = ">=0.9.7,<0.10"
+wheel = ">=0.45.1,<0.46"
+# cpp/cuda
+cmake = ">=3.31.6,<4"
+cuda = "12.6.*"
+gcc = "<12"
+gxx = "<12"
+ninja = "<2"
+# 
+numpy = "<2"
+opencv = "<5"
+psutil = "*"
+pybind11 = ">=3.0.1,<4"
+# huggingface
 tokenizers = ">=0.21.3,<0.22"
 transformers = ">=4.53.1,<5"
-uv = ">=0.7.19,<0.8"
-wheel = ">=0.45.1,<0.46"
+# 
+supervision = "==0.19.0"
 [pypi-dependencies]
-gradio = ">=5.35.0, <6"
+gradio = "<6"
 lvis = ">=0.5.3, <0.6"
 mmengine = { git = "https://github.com/open-mmlab/mmengine" }
 onnx = ">=1.18.0, <2"
 onnxruntime = ">=1.22.0, <2"
 onnxsim = ">=0.4.36, <0.5"
-torch = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
-torchaudio = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu118" }
-torchvision = { version = "==0.21.0", index = "https://download.pytorch.org/whl/cu118" }
+torch = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu126" }
+torchaudio = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu126" }
+torchvision = { version = "==0.21.0", index = "https://download.pytorch.org/whl/cu126" }
 [activation]
 env = { LD_LIBRARY_PATH = "$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$CONDA_PREFIX/lib:$LD_LIBRARY_PATH:$LD_LIBRARY_PATH", CUDA_HOME = "${CONDA_PREFIX}" }
 [tasks]
+postinstall = { cmd = "uv pip install --system --no-build-isolation --no-deps -e .", depends-on = [
+    "postinstall-mmcv",
+    "postinstall-mmdetection",
+    "postinstall-mmyolo",
+    "download-lvis-minival-annotation-file",
+] }
+# demo
 demo = { cmd = "python ./demo/image_demo.py {{ config }} {{ weight }} {{ inputs_dir }} {{ text_prompt }} --output-dir {{ outputs_dir }} --topk 100 --threshold 0.005", args = [
     { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
     { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
@@ -50,17 +62,15 @@ demo-gradio = { cmd = "python ./demo/gradio_demo.py {{ config }} {{ weight }}", 
     { "arg" = "config", "default" = "./configs/pretrain/yolo_world_v2_x_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.py" },
     { "arg" = "weight", "default" = "./weights/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
 ] }
+# download weights and configs
 download-lvis-minival-annotation-file = { cmd = "mkdir -p data/coco/lvis && cd data/coco/lvis && wget https://huggingface.co/GLIPModel/GLIP/resolve/main/lvis_v1_minival_inserted_image_name.json" }
 download-weights = { cmd = "mkdir -p weights && bash -c \"if [ ! -f 'weights/{{ filename }}' ]; then wget {{ url }} -O 'weights/{{ filename }}'; fi\"", args = [
     { "arg" = "url", "default" = "https://huggingface.co/wondervictor/YOLO-World/resolve/main/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
     { "arg" = "filename", "default" = "yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth" },
 ] }
-postinstall = { cmd = "uv pip install --no-build-isolation --no-deps -e .", depends-on = [
-    "postinstall-mmcv",
-    "postinstall-mmdetection",
-    "postinstall-mmyolo",
-    "download-lvis-minival-annotation-file",
-] }
-postinstall-mmcv = { cwd = "./third_party/mmcv", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
-postinstall-mmdetection = { cwd = "./third_party/mmdetection", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
-postinstall-mmyolo = { cwd = "./third_party/mmyolo", cmd = "MAX_JOBS=4 uv pip install --no-build-isolation ." }
+# install mmcv dependencies
+postinstall-mmcv = { cwd = "./third_party/mmcv", cmd = "MAX_JOBS=4 uv pip install --system --no-build-isolation ." }
+postinstall-mmdetection = { cwd = "./third_party/mmdetection", cmd = "MAX_JOBS=4 uv pip install --system --no-build-isolation ." }
+postinstall-mmyolo = { cwd = "./third_party/mmyolo", cmd = "MAX_JOBS=4 uv pip install --system --no-build-isolation ." }
+# check
+check-pytorch-cuda = "python -c \"import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'Device count: {torch.cuda.device_count()}')\""
