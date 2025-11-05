@@ -25,6 +25,9 @@ import numpy as np
 import rospy
 import supervision as sv
 import torch
+import requests
+import threading
+import time
 from dynamic_reconfigure.server import Server
 from mmdet.apis import init_detector
 from mmdet.utils import get_test_pipeline_cfg
@@ -33,6 +36,7 @@ from mmengine.dataset import Compose
 from mmengine.runner.amp import autocast
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
+from yolo_world_ros.msg import PromptList
 from yolo_world_ros.cfg import YOLOWorldConfig
 
 
@@ -64,8 +68,17 @@ class YOLOWorldROS:
         # Initialize dynamic parameters
         self.text_prompts = None
         self.text_prompt_file = None
-        self.use_manual_prompts = None
+        self.prompt_source = None
         self.texts = [[" "]]
+        self.base_texts = None
+        self.auto_texts = None
+        self.pending_texts = None
+
+        # Tagger thread state and latest image buffer
+        self.last_image = None
+        self.last_image_lock = threading.Lock()
+        self.tagger_thread = None
+        self.tagger_stop_event = threading.Event()
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -79,6 +92,7 @@ class YOLOWorldROS:
 
         # Set up dynamic reconfigure
         self.reconfigure_server = Server(YOLOWorldConfig, self.reconfigure_callback)
+        rospy.on_shutdown(self._stop_tagger_thread)
 
         # Initialize ROS components
         self.detection_pub = rospy.Publisher(
@@ -89,6 +103,7 @@ class YOLOWorldROS:
         )
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
+        self.prompts_pub = rospy.Publisher("prompts", PromptList, queue_size=10)
         # Rose-pine inspired colors
         rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
         self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
@@ -102,17 +117,37 @@ class YOLOWorldROS:
         Callback for dynamic reconfigure server.
         """
         texts_changed = False
-        if config.use_manual_prompts:
-            if self.use_manual_prompts is not True or self.text_prompts != config.text_prompts:
+
+        # Update tagger config
+        self.tagger_url = config.tagger_url
+        self.tagger_fps = config.tagger_fps if config.tagger_fps > 0 else 1.0
+        self.tagger_timeout = config.tagger_timeout if config.tagger_timeout > 0 else 10.0
+
+        source_changed = (self.prompt_source != config.prompt_source)
+
+        # Handle prompt source changes
+        if source_changed:
+            rospy.loginfo(f"Switching prompt source to {config.prompt_source} (0=manual,1=file,2=auto)")
+            if config.prompt_source == 2:
+                self._start_tagger_thread()
+            else:
+                self._stop_tagger_thread()
+
+        # Manual prompts
+        if config.prompt_source == 0:
+            if source_changed or self.text_prompts != config.text_prompts:
                 rospy.loginfo(f"Using manual prompts: '{config.text_prompts}'")
-                self.texts = [[t.strip()] for t in config.text_prompts.split(",")] + [[" "]]
+                new_texts = [[t.strip()] for t in config.text_prompts.split(",") if t.strip()] + [[" "]]
+                if len(new_texts) == 0:
+                    new_texts = [[" "]]
+                if not self._texts_equal(new_texts, self.texts):
+                    self.texts = new_texts
+                    texts_changed = True
                 self.text_prompts = config.text_prompts
-                texts_changed = True
-        else:  # Use file for prompts
-            if (
-                self.use_manual_prompts is not False
-                or self.text_prompt_file != config.text_prompt_file
-            ):
+
+        # File prompts
+        elif config.prompt_source == 1:
+            if source_changed or self.text_prompt_file != config.text_prompt_file:
                 if config.text_prompt_file and os.path.isfile(config.text_prompt_file):
                     rospy.loginfo(f"Using prompts from file: '{config.text_prompt_file}'")
                     try:
@@ -121,7 +156,7 @@ class YOLOWorldROS:
                         if file_path.endswith(".txt"):
                             with open(file_path, "r") as f:
                                 lines = f.readlines()
-                            new_texts = [[t.rstrip("\r\n")] for t in lines] + [[" "]]
+                            new_texts = [[t.rstrip("\r\n")] for t in lines if t.rstrip("\r\n")] + [[" "]]
                         elif file_path.endswith(".json"):
                             with open(file_path, "r") as f:
                                 loaded_json = json.load(f)
@@ -132,7 +167,7 @@ class YOLOWorldROS:
                                 "Only .txt and .json are supported. Not updating prompts."
                             )
 
-                        if new_texts is not None:
+                        if new_texts is not None and not self._texts_equal(new_texts, self.texts):
                             self.texts = new_texts
                             texts_changed = True
 
@@ -148,16 +183,95 @@ class YOLOWorldROS:
                     rospy.logwarn("Prompt file path is empty. Using previous prompts.")
                     self.text_prompt_file = config.text_prompt_file
 
-        self.use_manual_prompts = config.use_manual_prompts
+        # Auto prompts: do nothing immediately; apply when tagger produces new tags
+        elif config.prompt_source == 2:
+            pass
+
+        # Save source
+        self.prompt_source = config.prompt_source
 
         if texts_changed:
-            self.model.reparameterize(self.texts)
+            try:
+                self.model.reparameterize(self.texts)
+                self._publish_prompts(self.texts)
+            except Exception as e:
+                rospy.logerr(f"Failed to apply prompts: {e}")
 
+        # Other runtime params
         self.score_threshold = config.score_threshold
         self.top_k = config.top_k
         self.use_amp = config.use_amp
         self.visualize = config.visualize
         return config
+
+    def _start_tagger_thread(self):
+        if self.tagger_thread is not None and self.tagger_thread.is_alive():
+            return
+        self.tagger_stop_event.clear()
+        self.tagger_thread = threading.Thread(target=self._tagger_worker, daemon=True)
+        self.tagger_thread.start()
+        rospy.loginfo("Started VLM tagger thread.")
+
+    def _stop_tagger_thread(self):
+        if self.tagger_thread is None:
+            return
+        self.tagger_stop_event.set()
+        try:
+            self.tagger_thread.join(timeout=2.0)
+        except Exception:
+            pass
+        self.tagger_thread = None
+        rospy.loginfo("Stopped VLM tagger thread.")
+
+    def _tagger_worker(self):
+        # latest-only loop at configured FPS
+        while not self.tagger_stop_event.is_set():
+            start = time.time()
+            img = None
+            with self.last_image_lock:
+                if self.last_image is not None:
+                    img = self.last_image.copy()
+            if img is not None and getattr(self, "prompt_source", None) == 2:
+                try:
+                    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                    if ok:
+                        files = {"image": ("frame.jpg", buf.tobytes(), "image/jpeg")}
+                        resp = requests.post(self.tagger_url, files=files, timeout=self.tagger_timeout)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            tags = data.get("tags", [])
+                            if isinstance(tags, list) and len(tags) > 0:
+                                new_texts = [[str(t)] for t in tags if isinstance(t, str) and t.strip() != ""] + [[" "]]
+                                # Defer reparameterize to image_callback; only set if changed
+                                if not self._texts_equal(new_texts, self.texts):
+                                    self.pending_texts = new_texts
+                        else:
+                            rospy.logwarn_throttle(5.0, f"Tagger HTTP {resp.status_code}")
+                    else:
+                        rospy.logwarn_throttle(5.0, "Failed to JPEG-encode frame for tagger.")
+                except Exception as e:
+                    rospy.logwarn_throttle(5.0, f"Tagger request failed: {e}")
+            # sleep to maintain tagger_fps
+            period = 1.0 / max(1e-6, getattr(self, "tagger_fps", 1.0))
+            elapsed = time.time() - start
+            sleep_t = max(0.0, period - elapsed)
+            self.tagger_stop_event.wait(timeout=sleep_t)
+
+    def _publish_prompts(self, texts):
+        try:
+            msg = PromptList()
+            # drop the sentinel " " from publication
+            msg.prompts = [row[0] for row in texts if isinstance(row, list) and len(row) > 0 and row[0].strip() != ""]
+            self.prompts_pub.publish(msg)
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"Failed to publish prompts: {e}")
+
+    @staticmethod
+    def _texts_equal(a, b):
+        try:
+            return a == b
+        except Exception:
+            return False
 
     def image_callback(self, msg):
         """
@@ -176,6 +290,23 @@ class YOLOWorldROS:
         except Exception as e:
             rospy.logerr(f"Could not convert image: {e}")
             return
+
+        # Update the latest image for the tagger (BGR)
+        with self.last_image_lock:
+            self.last_image = cv_image.copy()
+
+        # Apply pending auto prompts if available
+        if getattr(self, "prompt_source", None) == 2 and self.pending_texts is not None:
+            new_texts = self.pending_texts
+            self.pending_texts = None
+            if not self._texts_equal(new_texts, self.texts):
+                try:
+                    self.model.reparameterize(new_texts)
+                    self.texts = new_texts
+                    self.auto_texts = new_texts
+                    self._publish_prompts(self.texts)
+                except Exception as e:
+                    rospy.logerr(f"Failed to apply auto prompts: {e}")
 
         # Prepare data for the model
         data_info = dict(img=cv_image, texts=self.texts)

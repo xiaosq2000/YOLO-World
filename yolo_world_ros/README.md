@@ -7,7 +7,8 @@ This package is intended to live inside the YOLO‑World repository tree and use
 - Subscribes: sensor_msgs/Image (bgr8 or rgb8)
 - Publishes: vision_msgs/Detection2DArray
 - Publishes (optional): sensor_msgs/Image with bounding boxes and labels
-- Dynamic params: text prompts (manual or file), score threshold, top‑k, AMP, visualization
+- Publishes: yolo_world_ros/PromptList (current effective prompts)
+- Dynamic params: prompt source (manual/file/auto), tagger_url/fps/timeout, text prompts, score threshold, top‑k, AMP, visualization
 
 ## Quick start
 
@@ -62,11 +63,14 @@ rosrun rqt_reconfigure rqt_reconfigure
 Select the node (yolo_world_ros_node or yolo_world_ros).
 
 Parameters:
-- use_manual_prompts (bool): If true, use the text_prompts string; if false, read from text_prompt_file
-- text_prompts (str): Comma‑separated list, e.g., "person, car, dog"
-- text_prompt_file (str): Path to .txt or .json prompt file
+- prompt_source (int): 0=manual, 1=file, 2=auto (VLM tagger)
+- text_prompts (str): Comma‑separated list, e.g., "person, car, dog" (used when prompt_source=manual)
+- text_prompt_file (str): Path to .txt or .json prompt file (used when prompt_source=file)
   - .txt: one prompt per line
   - .json: list of lists, e.g., [["person"], ["car"], …]
+- tagger_url (str): VLM tagger endpoint URL, default http://localhost:59810/tag
+- tagger_fps (double): Max request rate to the tagger (Hz), default 1.0
+- tagger_timeout (double): HTTP timeout (seconds), default 10.0
 - score_threshold (double): Confidence threshold (0..1)
 - top_k (int): Keep top‑K predictions after thresholding
 - use_amp (bool): Enable mixed‑precision inference
@@ -87,6 +91,8 @@ Published:
     - results[0].id (int): class index corresponding to the prompt list order
     - results[0].score (float): confidence score
   - To get the label string, map the integer id to the corresponding prompt string you provided.
+- prompts (yolo_world_ros/PromptList)
+  - string[] prompts: current effective prompt strings (sentinel entry is omitted)
 - annotated_image_topic (sensor_msgs/Image)
   - Overlay with boxes and "label score" text. Toggle via visualize.
 
