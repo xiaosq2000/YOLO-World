@@ -16,18 +16,18 @@
 # limitations under the License.
 #
 
-import os
 import json
+import os
+import threading
+import time
 
 import cv2
 import git
 import numpy as np
+import requests
 import rospy
 import supervision as sv
 import torch
-import requests
-import threading
-import time
 from dynamic_reconfigure.server import Server
 from mmdet.apis import init_detector
 from mmdet.utils import get_test_pipeline_cfg
@@ -36,8 +36,8 @@ from mmengine.dataset import Compose
 from mmengine.runner.amp import autocast
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
-from yolo_world_ros.msg import PromptList
 from yolo_world_ros.cfg import YOLOWorldConfig
+from yolo_world_ros.msg import PromptList
 
 
 class YOLOWorldROS:
@@ -123,11 +123,13 @@ class YOLOWorldROS:
         self.tagger_fps = config.tagger_fps if config.tagger_fps > 0 else 1.0
         self.tagger_timeout = config.tagger_timeout if config.tagger_timeout > 0 else 10.0
 
-        source_changed = (self.prompt_source != config.prompt_source)
+        source_changed = self.prompt_source != config.prompt_source
 
         # Handle prompt source changes
         if source_changed:
-            rospy.loginfo(f"Switching prompt source to {config.prompt_source} (0=manual,1=file,2=auto)")
+            rospy.loginfo(
+                f"Switching prompt source to {config.prompt_source} (0=manual,1=file,2=auto)"
+            )
             if config.prompt_source == 2:
                 self._start_tagger_thread()
             else:
@@ -137,7 +139,9 @@ class YOLOWorldROS:
         if config.prompt_source == 0:
             if source_changed or self.text_prompts != config.text_prompts:
                 rospy.loginfo(f"Using manual prompts: '{config.text_prompts}'")
-                new_texts = [[t.strip()] for t in config.text_prompts.split(",") if t.strip()] + [[" "]]
+                new_texts = [[t.strip()] for t in config.text_prompts.split(",") if t.strip()] + [
+                    [" "]
+                ]
                 if len(new_texts) == 0:
                     new_texts = [[" "]]
                 if not self._texts_equal(new_texts, self.texts):
@@ -156,7 +160,9 @@ class YOLOWorldROS:
                         if file_path.endswith(".txt"):
                             with open(file_path, "r") as f:
                                 lines = f.readlines()
-                            new_texts = [[t.rstrip("\r\n")] for t in lines if t.rstrip("\r\n")] + [[" "]]
+                            new_texts = [[t.rstrip("\r\n")] for t in lines if t.rstrip("\r\n")] + [
+                                [" "]
+                            ]
                         elif file_path.endswith(".json"):
                             with open(file_path, "r") as f:
                                 loaded_json = json.load(f)
@@ -236,12 +242,16 @@ class YOLOWorldROS:
                     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                     if ok:
                         files = {"image": ("frame.jpg", buf.tobytes(), "image/jpeg")}
-                        resp = requests.post(self.tagger_url, files=files, timeout=self.tagger_timeout)
+                        resp = requests.post(
+                            self.tagger_url, files=files, timeout=self.tagger_timeout
+                        )
                         if resp.status_code == 200:
                             data = resp.json()
                             tags = data.get("tags", [])
                             if isinstance(tags, list) and len(tags) > 0:
-                                new_texts = [[str(t)] for t in tags if isinstance(t, str) and t.strip() != ""] + [[" "]]
+                                new_texts = [
+                                    [str(t)] for t in tags if isinstance(t, str) and t.strip() != ""
+                                ] + [[" "]]
                                 # Defer reparameterize to image_callback; only set if changed
                                 if not self._texts_equal(new_texts, self.texts):
                                     self.pending_texts = new_texts
@@ -261,7 +271,11 @@ class YOLOWorldROS:
         try:
             msg = PromptList()
             # drop the sentinel " " from publication
-            msg.prompts = [row[0] for row in texts if isinstance(row, list) and len(row) > 0 and row[0].strip() != ""]
+            msg.prompts = [
+                row[0]
+                for row in texts
+                if isinstance(row, list) and len(row) > 0 and row[0].strip() != ""
+            ]
             self.prompts_pub.publish(msg)
         except Exception as e:
             rospy.logwarn_throttle(5.0, f"Failed to publish prompts: {e}")
@@ -330,21 +344,53 @@ class YOLOWorldROS:
         pred_instances = pred_instances.cpu().numpy()
 
         if self.visualize:
+            H, W = cv_image.shape[:2]
             detections = sv.Detections(
                 xyxy=pred_instances["bboxes"],
                 confidence=pred_instances["scores"],
                 class_id=pred_instances["labels"].astype(int),
             )
-            labels = [
-                f"{self.texts[class_id][0]} {confidence:.2f}"
-                for class_id, confidence in zip(detections.class_id, detections.confidence)
-            ]
+
+            # Draw boxes using the existing color palette
             annotated_frame = self.box_annotator.annotate(
                 scene=cv_image.copy(), detections=detections
             )
-            annotated_frame = self.label_annotator.annotate(
-                scene=annotated_frame, detections=detections, labels=labels
-            )
+
+            # Draw readable labels with a solid background and on-screen clamping
+            for bbox, class_id, confidence in zip(
+                pred_instances["bboxes"], pred_instances["labels"], pred_instances["scores"]
+            ):
+                x1, y1, x2, y2 = bbox
+                label = f"{self.texts[int(class_id)][0]} {float(confidence):.2f}"
+
+                # Prefer to place label slightly above the top-left corner of the box
+                tx = int(x1)
+                ty = int(y1) - 8
+
+                # Measure text and clamp so the full label stays visible on-screen
+                (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                x0 = max(0, min(tx, W - tw - 6))
+                y0 = max(th + 6, min(ty, H - 2))
+
+                # Draw filled background for readability
+                cv2.rectangle(
+                    annotated_frame,
+                    (x0, y0 - th - 6),
+                    (x0 + tw + 6, y0 + baseline),
+                    (0, 0, 0),
+                    -1,
+                )
+                # Draw text on top
+                cv2.putText(
+                    annotated_frame,
+                    label,
+                    (x0 + 3, y0 - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
             latency_text = f"Latency: {latency_ms:.2f} ms"
             cv2.putText(
