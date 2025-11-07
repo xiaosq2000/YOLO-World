@@ -74,6 +74,12 @@ class YOLOWorldROS:
         self.auto_texts = None
         self.pending_texts = None
 
+        # Visualization defaults
+        self.latency_font_scale = 1.0
+        self.bbox_thickness = 2
+        self.label_font_scale = 0.6
+        self.label_text_thickness = 1
+
         # Tagger thread state and latest image buffer
         self.last_image = None
         self.last_image_lock = threading.Lock()
@@ -90,6 +96,16 @@ class YOLOWorldROS:
         test_pipeline_cfg[0]["type"] = "mmdet.LoadImageFromNDArray"
         self.test_pipeline = Compose(test_pipeline_cfg)
 
+        # Initialize visualization palette and annotators before dynamic reconfigure
+        rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
+        self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
+        self.box_annotator = sv.BoxAnnotator(
+            color=self.color_palette,
+            thickness=self.bbox_thickness,
+            text_scale=self.label_font_scale,
+            text_thickness=self.label_text_thickness,
+        )
+
         # Set up dynamic reconfigure
         self.reconfigure_server = Server(YOLOWorldConfig, self.reconfigure_callback)
         rospy.on_shutdown(self._stop_tagger_thread)
@@ -104,11 +120,6 @@ class YOLOWorldROS:
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
         self.prompts_pub = rospy.Publisher("prompts", PromptList, queue_size=10)
-        # Rose-pine inspired colors
-        rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
-        self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
-        self.box_annotator = sv.BoxAnnotator(color=self.color_palette)
-        self.label_annotator = sv.LabelAnnotator(color=self.color_palette)
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
 
@@ -208,6 +219,21 @@ class YOLOWorldROS:
         self.top_k = config.top_k
         self.use_amp = config.use_amp
         self.visualize = config.visualize
+
+        # Visualization params
+        self.latency_font_scale = config.latency_font_scale
+        self.bbox_thickness = config.bbox_thickness
+        self.label_font_scale = config.label_font_scale
+        self.label_text_thickness = config.label_text_thickness
+
+        # Recreate annotators with updated settings
+        self.box_annotator = sv.BoxAnnotator(
+            color=self.color_palette,
+            thickness=self.bbox_thickness,
+            text_scale=self.label_font_scale,
+            text_thickness=self.label_text_thickness,
+        )
+
         return config
 
     def _start_tagger_thread(self):
@@ -351,46 +377,23 @@ class YOLOWorldROS:
                 class_id=pred_instances["labels"].astype(int),
             )
 
-            # Draw boxes using the existing color palette
+            # Draw boxes and labels using Supervision
+            names = [
+                (row[0].strip() if isinstance(row, list) and len(row) > 0 and isinstance(row[0], str) else "")
+                for row in self.texts
+            ]
+            labels = []
+            for cls, conf in zip(detections.class_id, detections.confidence):
+                idx = int(cls)
+                if 0 <= idx < len(names) and names[idx] != "":
+                    labels.append(f"{names[idx]} {float(conf):.2f}")
+                else:
+                    labels.append("")
             annotated_frame = self.box_annotator.annotate(
-                scene=cv_image.copy(), detections=detections
+                scene=cv_image.copy(),
+                detections=detections,
+                labels=labels,
             )
-
-            # Draw readable labels with a solid background and on-screen clamping
-            for bbox, class_id, confidence in zip(
-                pred_instances["bboxes"], pred_instances["labels"], pred_instances["scores"]
-            ):
-                x1, y1, x2, y2 = bbox
-                label = f"{self.texts[int(class_id)][0]} {float(confidence):.2f}"
-
-                # Prefer to place label slightly above the top-left corner of the box
-                tx = int(x1)
-                ty = int(y1) - 8
-
-                # Measure text and clamp so the full label stays visible on-screen
-                (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                x0 = max(0, min(tx, W - tw - 6))
-                y0 = max(th + 6, min(ty, H - 2))
-
-                # Draw filled background for readability
-                cv2.rectangle(
-                    annotated_frame,
-                    (x0, y0 - th - 6),
-                    (x0 + tw + 6, y0 + baseline),
-                    (0, 0, 0),
-                    -1,
-                )
-                # Draw text on top
-                cv2.putText(
-                    annotated_frame,
-                    label,
-                    (x0 + 3, y0 - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
 
             latency_text = f"Latency: {latency_ms:.2f} ms"
             cv2.putText(
@@ -398,7 +401,7 @@ class YOLOWorldROS:
                 latency_text,
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1,
+                self.latency_font_scale,
                 (0, 0, 255),
                 2,
             )
