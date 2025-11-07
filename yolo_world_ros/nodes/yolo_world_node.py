@@ -38,6 +38,7 @@ from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from yolo_world_ros.cfg import YOLOWorldConfig
 from yolo_world_ros.msg import PromptList
+from PIL import Image as PILImage, ImageDraw, ImageFont
 
 
 class YOLOWorldROS:
@@ -75,7 +76,7 @@ class YOLOWorldROS:
         self.pending_texts = None
 
         # Visualization defaults
-        self.latency_font_scale = 1.0
+        self.hud_font_scale = 1.0
         self.bbox_thickness = 2
         self.label_font_scale = 0.6
         self.label_text_thickness = 1
@@ -85,6 +86,7 @@ class YOLOWorldROS:
         self.last_image_lock = threading.Lock()
         self.tagger_thread = None
         self.tagger_stop_event = threading.Event()
+        self.last_tagger_latency_ms = None
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -221,7 +223,7 @@ class YOLOWorldROS:
         self.visualize = config.visualize
 
         # Visualization params
-        self.latency_font_scale = config.latency_font_scale
+        self.hud_font_scale = config.hud_font_scale
         self.bbox_thickness = config.bbox_thickness
         self.label_font_scale = config.label_font_scale
         self.label_text_thickness = config.label_text_thickness
@@ -265,6 +267,7 @@ class YOLOWorldROS:
                     img = self.last_image.copy()
             if img is not None and getattr(self, "prompt_source", None) == 2:
                 try:
+                    t0 = time.perf_counter()
                     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                     if ok:
                         files = {"image": ("frame.jpg", buf.tobytes(), "image/jpeg")}
@@ -273,6 +276,7 @@ class YOLOWorldROS:
                         )
                         if resp.status_code == 200:
                             data = resp.json()
+                            self.last_tagger_latency_ms = (time.perf_counter() - t0) * 1000.0
                             tags = data.get("tags", [])
                             if isinstance(tags, list) and len(tags) > 0:
                                 new_texts = [
@@ -356,12 +360,12 @@ class YOLOWorldROS:
         )
 
         # Perform inference
-        start_time = rospy.get_time()
+        detector_start_t = rospy.get_time()
         with autocast(enabled=self.use_amp), torch.no_grad():
             output = self.model.test_step(data_batch)[0]
             pred_instances = output.pred_instances
             pred_instances = pred_instances[pred_instances.scores.float() > self.score_threshold]
-        latency_ms = (rospy.get_time() - start_time) * 1000
+        detector_latency_ms = (rospy.get_time() - detector_start_t) * 1000
 
         if len(pred_instances.scores) > self.top_k:
             indices = pred_instances.scores.float().topk(self.top_k)[1]
@@ -395,16 +399,35 @@ class YOLOWorldROS:
                 labels=labels,
             )
 
-            latency_text = f"Latency: {latency_ms:.2f} ms"
-            cv2.putText(
-                annotated_frame,
-                latency_text,
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                self.latency_font_scale,
-                (0, 0, 255),
-                2,
-            )
+            detector_text = f"Detector: {detector_latency_ms:.2f} ms"
+
+            # Draw HUD text with Pillow for crisper rendering
+            _pil_img = PILImage.fromarray(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
+            _draw = ImageDraw.Draw(_pil_img)
+
+            # Choose font size based on hud_font_scale
+            _font_size = max(10, int(18 * self.hud_font_scale))
+            _font = None
+            if os.path.isfile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+                _font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _font_size)
+            else:
+                try:
+                    _font = ImageFont.truetype("DejaVuSans.ttf", _font_size)
+                except Exception:
+                    _font = ImageFont.load_default()
+
+            # Draw detector and tagger text (RGB color)
+            _draw.text((10, 30), detector_text, font=_font, fill=(255, 0, 0))
+            if getattr(self, "prompt_source", None) == 2:
+                tagger_text = (
+                    f"Tagger: {self.last_tagger_latency_ms:.2f} ms"
+                    if self.last_tagger_latency_ms is not None else
+                    "Tagger: N/A"
+                )
+                _draw.text((10, int(30 + 28 * self.hud_font_scale)), tagger_text, font=_font, fill=(255, 0, 0))
+
+            # Convert back to BGR numpy array
+            annotated_frame = cv2.cvtColor(np.array(_pil_img), cv2.COLOR_RGB2BGR)
 
             # Manually create Image message without cv_bridge
             annotated_image_msg = Image()
