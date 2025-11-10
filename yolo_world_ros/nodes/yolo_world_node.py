@@ -74,6 +74,7 @@ class YOLOWorldROS:
         self.base_texts = None
         self.auto_texts = None
         self.pending_texts = None
+        self.last_scene_text = None
 
         # Visualization defaults
         self.hud_font_scale = 1.0
@@ -277,14 +278,17 @@ class YOLOWorldROS:
                         if resp.status_code == 200:
                             data = resp.json()
                             self.last_tagger_latency_ms = (time.perf_counter() - t0) * 1000.0
-                            tags = data.get("tags", [])
-                            if isinstance(tags, list) and len(tags) > 0:
+                            objects = data.get("objects", [])
+                            if isinstance(objects, list) and len(objects) > 0:
                                 new_texts = [
-                                    [str(t)] for t in tags if isinstance(t, str) and t.strip() != ""
+                                    [str(t)] for t in objects if isinstance(t, str) and t.strip() != ""
                                 ] + [[" "]]
                                 # Defer reparameterize to image_callback; only set if changed
                                 if not self._texts_equal(new_texts, self.texts):
                                     self.pending_texts = new_texts
+                            scene = data.get("scene", None)
+                            if isinstance(scene, str) and scene.strip() != "":
+                                self.last_scene_text = scene.strip()
                         else:
                             rospy.logwarn_throttle(5.0, f"Tagger HTTP {resp.status_code}")
                     else:
@@ -425,6 +429,18 @@ class YOLOWorldROS:
                     "Tagger: N/A"
                 )
                 _draw.text((10, int(30 + 28 * self.hud_font_scale)), tagger_text, font=_font, fill=(255, 0, 0))
+            # Draw scene label at top-right if available
+            if isinstance(getattr(self, "last_scene_text", None), str) and self.last_scene_text.strip() != "":
+                scene_text = f"scene: {self.last_scene_text}"
+                try:
+                    bbox = _draw.textbbox((0, 0), scene_text, font=_font)
+                    text_w = bbox[2] - bbox[0]
+                    text_h = bbox[3] - bbox[1]
+                except Exception:
+                    text_w, text_h = _draw.textsize(scene_text, font=_font)
+                x = _pil_img.width - text_w - 10
+                y = 10
+                _draw.text((x, y), scene_text, font=_font, fill=(255, 0, 0))
 
             # Convert back to BGR numpy array
             annotated_frame = cv2.cvtColor(np.array(_pil_img), cv2.COLOR_RGB2BGR)
