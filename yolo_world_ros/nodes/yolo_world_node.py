@@ -34,11 +34,12 @@ from mmdet.utils import get_test_pipeline_cfg
 from mmengine.config import Config
 from mmengine.dataset import Compose
 from mmengine.runner.amp import autocast
+from PIL import Image as PILImage
+from PIL import ImageDraw, ImageFont
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from yolo_world_ros.cfg import YOLOWorldConfig
 from yolo_world_ros.msg import PromptList
-from PIL import Image as PILImage, ImageDraw, ImageFont
 
 
 class YOLOWorldROS:
@@ -100,14 +101,9 @@ class YOLOWorldROS:
         self.test_pipeline = Compose(test_pipeline_cfg)
 
         # Initialize visualization palette and annotators before dynamic reconfigure
-        rose_pine_colors = ["#ebbcba", "#c4a7e7", "#f6c177", "#9ccfd8", "#31748f", "#eb6f92"]
-        self.color_palette = sv.ColorPalette.from_hex(rose_pine_colors)
-        self.box_annotator = sv.BoxAnnotator(
-            color=self.color_palette,
-            thickness=self.bbox_thickness,
-            text_scale=self.label_font_scale,
-            text_thickness=self.label_text_thickness,
-        )
+        self.palette_lightness = 0.62
+        self.palette_chroma = 0.18
+        self._rebuild_color_palette()
 
         # Set up dynamic reconfigure
         self.reconfigure_server = Server(YOLOWorldConfig, self.reconfigure_callback)
@@ -222,6 +218,9 @@ class YOLOWorldROS:
         self.top_k = config.top_k
         self.use_amp = config.use_amp
         self.visualize = config.visualize
+        # Palette params
+        self.palette_lightness = config.palette_lightness
+        self.palette_chroma = config.palette_chroma
 
         # Visualization params
         self.hud_font_scale = config.hud_font_scale
@@ -230,12 +229,7 @@ class YOLOWorldROS:
         self.label_text_thickness = config.label_text_thickness
 
         # Recreate annotators with updated settings
-        self.box_annotator = sv.BoxAnnotator(
-            color=self.color_palette,
-            thickness=self.bbox_thickness,
-            text_scale=self.label_font_scale,
-            text_thickness=self.label_text_thickness,
-        )
+        self._rebuild_color_palette()
 
         return config
 
@@ -281,7 +275,9 @@ class YOLOWorldROS:
                             objects = data.get("objects", [])
                             if isinstance(objects, list) and len(objects) > 0:
                                 new_texts = [
-                                    [str(t)] for t in objects if isinstance(t, str) and t.strip() != ""
+                                    [str(t)]
+                                    for t in objects
+                                    if isinstance(t, str) and t.strip() != ""
                                 ] + [[" "]]
                                 # Defer reparameterize to image_callback; only set if changed
                                 if not self._texts_equal(new_texts, self.texts):
@@ -321,6 +317,72 @@ class YOLOWorldROS:
         except Exception:
             return False
 
+    # OKLCh-based color palette generation
+    def _oklch_to_linear_srgb(self, L, C, h_deg):
+        import math
+
+        h = math.radians(h_deg)
+        a = C * math.cos(h)
+        b = C * math.sin(h)
+        l_ = L + 0.3963377774 * a + 0.2158037573 * b
+        m_ = L - 0.1055613458 * a - 0.0638541728 * b
+        s_ = L - 0.0894841775 * a - 1.2914855480 * b
+        l = l_**3
+        m = m_**3
+        s = s_**3
+        r_lin = +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+        g_lin = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+        b_lin = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        return r_lin, g_lin, b_lin
+
+    def _srgb_compand(self, u):
+        if u <= 0.0:
+            return 0.0
+        if u >= 1.0:
+            return 1.0
+        if u <= 0.0031308:
+            return 12.92 * u
+        else:
+            return 1.055 * (u ** (1.0 / 2.4)) - 0.055
+
+    def _oklch_to_srgb_hex(self, L, C, h_deg):
+        C_local = max(0.0, float(C))
+        r_lin = g_lin = b_lin = 0.0
+        for _ in range(24):
+            r_lin, g_lin, b_lin = self._oklch_to_linear_srgb(L, C_local, h_deg)
+            if 0.0 <= r_lin <= 1.0 and 0.0 <= g_lin <= 1.0 and 0.0 <= b_lin <= 1.0:
+                break
+            C_local *= 0.9
+        r = self._srgb_compand(r_lin)
+        g = self._srgb_compand(g_lin)
+        b = self._srgb_compand(b_lin)
+        r8 = max(0, min(255, int(round(r * 255))))
+        g8 = max(0, min(255, int(round(g * 255))))
+        b8 = max(0, min(255, int(round(b * 255))))
+        return f"#{r8:02x}{g8:02x}{b8:02x}"
+
+    def _generate_oklch_palette_hex(self, n, seed_h=0.0):
+        # Evenly spaced hues using the golden angle
+        hex_list = []
+        golden_angle = 137.50776405003785
+        L = float(getattr(self, "palette_lightness", 0.62))
+        C = float(getattr(self, "palette_chroma", 0.18))
+        for i in range(max(1, int(n))):
+            h = (seed_h + i * golden_angle) % 360.0
+            hex_list.append(self._oklch_to_srgb_hex(L, C, h))
+        return hex_list
+
+    def _rebuild_color_palette(self):
+        n = len(self.texts) if isinstance(self.texts, list) else 1
+        hex_list = self._generate_oklch_palette_hex(n)
+        self.color_palette = sv.ColorPalette.from_hex(hex_list)
+        self.box_annotator = sv.BoxAnnotator(
+            color=self.color_palette,
+            thickness=self.bbox_thickness,
+            text_scale=self.label_font_scale,
+            text_thickness=self.label_text_thickness,
+        )
+
     def image_callback(self, msg):
         """
         Callback function for the image subscriber. Performs inference on the
@@ -353,6 +415,7 @@ class YOLOWorldROS:
                     self.texts = new_texts
                     self.auto_texts = new_texts
                     self._publish_prompts(self.texts)
+                    self._rebuild_color_palette()
                 except Exception as e:
                     rospy.logerr(f"Failed to apply auto prompts: {e}")
 
@@ -387,7 +450,11 @@ class YOLOWorldROS:
 
             # Draw boxes and labels using Supervision
             names = [
-                (row[0].strip() if isinstance(row, list) and len(row) > 0 and isinstance(row[0], str) else "")
+                (
+                    row[0].strip()
+                    if isinstance(row, list) and len(row) > 0 and isinstance(row[0], str)
+                    else ""
+                )
                 for row in self.texts
             ]
             labels = []
@@ -413,7 +480,9 @@ class YOLOWorldROS:
             _font_size = max(10, int(18 * self.hud_font_scale))
             _font = None
             if os.path.isfile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-                _font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _font_size)
+                _font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", _font_size
+                )
             else:
                 try:
                     _font = ImageFont.truetype("DejaVuSans.ttf", _font_size)
@@ -425,12 +494,20 @@ class YOLOWorldROS:
             if getattr(self, "prompt_source", None) == 2:
                 tagger_text = (
                     f"Tagger: {self.last_tagger_latency_ms:.2f} ms"
-                    if self.last_tagger_latency_ms is not None else
-                    "Tagger: N/A"
+                    if self.last_tagger_latency_ms is not None
+                    else "Tagger: N/A"
                 )
-                _draw.text((10, int(30 + 28 * self.hud_font_scale)), tagger_text, font=_font, fill=(255, 0, 0))
+                _draw.text(
+                    (10, int(30 + 28 * self.hud_font_scale)),
+                    tagger_text,
+                    font=_font,
+                    fill=(255, 0, 0),
+                )
             # Draw scene label at top-right if available
-            if isinstance(getattr(self, "last_scene_text", None), str) and self.last_scene_text.strip() != "":
+            if (
+                isinstance(getattr(self, "last_scene_text", None), str)
+                and self.last_scene_text.strip() != ""
+            ):
                 scene_text = f"scene: {self.last_scene_text}"
                 try:
                     bbox = _draw.textbbox((0, 0), scene_text, font=_font)

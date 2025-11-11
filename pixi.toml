@@ -41,6 +41,7 @@ onnxsim = ">=0.4.36, <0.5"
 torch = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu126" }
 torchaudio = { version = "==2.6.0", index = "https://download.pytorch.org/whl/cu126" }
 torchvision = { version = "==0.21.0", index = "https://download.pytorch.org/whl/cu126" }
+coloria = ">=0.14.7, <0.15"
 [activation]
 env = { LD_LIBRARY_PATH = "$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$CONDA_PREFIX/lib:$LD_LIBRARY_PATH:$LD_LIBRARY_PATH", CUDA_HOME = "${CONDA_PREFIX}" }
 [tasks]
