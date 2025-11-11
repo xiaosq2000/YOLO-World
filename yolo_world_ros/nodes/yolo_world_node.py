@@ -39,7 +39,7 @@ from PIL import ImageDraw, ImageFont
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from yolo_world_ros.cfg import YOLOWorldConfig
-from yolo_world_ros.msg import PromptList
+from yolo_world_ros.msg import PromptList, PromptPalette
 
 
 class YOLOWorldROS:
@@ -89,6 +89,7 @@ class YOLOWorldROS:
         self.tagger_thread = None
         self.tagger_stop_event = threading.Event()
         self.last_tagger_latency_ms = None
+        self.prompt_id = 0
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -118,9 +119,17 @@ class YOLOWorldROS:
         )
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
-        self.prompts_pub = rospy.Publisher("prompts", PromptList, queue_size=10)
+        self.prompts_pub = rospy.Publisher("prompts", PromptList, queue_size=1, latch=True)
+        self.palette_pub = rospy.Publisher(
+            "prompts_palette", PromptPalette, queue_size=1, latch=True
+        )
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
+        # Publish initial prompts and palette so latched topics are populated
+        try:
+            self._publish_prompts(self.texts)
+        except Exception as e:
+            rospy.logwarn(f"Failed to publish initial prompts/palette: {e}")
 
     def reconfigure_callback(self, config, level):
         """
@@ -219,6 +228,9 @@ class YOLOWorldROS:
         self.use_amp = config.use_amp
         self.visualize = config.visualize
         # Palette params
+        palette_changed = config.palette_lightness != getattr(
+            self, "palette_lightness", None
+        ) or config.palette_chroma != getattr(self, "palette_chroma", None)
         self.palette_lightness = config.palette_lightness
         self.palette_chroma = config.palette_chroma
 
@@ -230,6 +242,13 @@ class YOLOWorldROS:
 
         # Recreate annotators with updated settings
         self._rebuild_color_palette()
+
+        # If only palette changed (and prompts stayed the same), publish updated palette/prompts
+        if palette_changed and not texts_changed:
+            try:
+                self._publish_prompts(self.texts)
+            except Exception as e:
+                rospy.logerr(f"Failed to publish updated palette: {e}")
 
         return config
 
@@ -299,16 +318,51 @@ class YOLOWorldROS:
 
     def _publish_prompts(self, texts):
         try:
-            msg = PromptList()
-            # drop the sentinel " " from publication
-            msg.prompts = [
+            # Increment prompt/palette version id and use a shared timestamp for all palette-related messages
+            self.prompt_id = getattr(self, "prompt_id", 0) + 1
+            now = rospy.Time.now()
+
+            # Build published prompt list (exclude sentinel " ")
+            pub_prompts = [
                 row[0]
                 for row in texts
                 if isinstance(row, list) and len(row) > 0 and row[0].strip() != ""
             ]
-            self.prompts_pub.publish(msg)
+
+            # Build color palette corresponding to current texts using the same generator as the annotator.
+            # Filter out the sentinel entry to keep indices aligned for consumers.
+            n_full = len(texts) if isinstance(texts, list) else 1
+            full_hex = self._generate_oklch_palette_hex(n_full)
+            colors_hex = []
+            colors_bgr = []
+            for i, row in enumerate(texts if isinstance(texts, list) else []):
+                if isinstance(row, list) and len(row) > 0 and row[0].strip() != "":
+                    hx = full_hex[i]
+                    colors_hex.append(hx)
+                    # Convert #RRGGBB to BGR uint8 triplet
+                    hx_clean = hx.lstrip("#")
+                    r = int(hx_clean[0:2], 16)
+                    g = int(hx_clean[2:4], 16)
+                    b = int(hx_clean[4:6], 16)
+                    colors_bgr.extend([b, g, r])
+
+            # Publish PromptList (backward compatible)
+            prompts_msg = PromptList()
+            prompts_msg.stamp = now
+            prompts_msg.id = self.prompt_id
+            prompts_msg.prompts = pub_prompts
+            self.prompts_pub.publish(prompts_msg)
+
+            # Publish PromptPalette
+            palette_msg = PromptPalette()
+            palette_msg.stamp = now
+            palette_msg.id = self.prompt_id
+            palette_msg.prompts = pub_prompts
+            palette_msg.colors_hex = colors_hex
+            palette_msg.colors_bgr = colors_bgr
+            self.palette_pub.publish(palette_msg)
         except Exception as e:
-            rospy.logwarn_throttle(5.0, f"Failed to publish prompts: {e}")
+            rospy.logwarn_throttle(5.0, f"Failed to publish prompts/palette: {e}")
 
     @staticmethod
     def _texts_equal(a, b):
@@ -536,6 +590,7 @@ class YOLOWorldROS:
         # Create and populate the Detection2DArray message
         detection_array = Detection2DArray()
         detection_array.header = msg.header
+        detection_array.header.frame_id = f"yolo_world_set:{self.prompt_id}"
 
         for bbox, label, score in zip(
             pred_instances["bboxes"], pred_instances["labels"], pred_instances["scores"]
