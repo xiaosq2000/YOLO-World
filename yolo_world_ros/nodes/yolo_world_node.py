@@ -430,9 +430,12 @@ class YOLOWorldROS:
         n = len(self.texts) if isinstance(self.texts, list) else 1
         hex_list = self._generate_oklch_palette_hex(n)
         self.color_palette = sv.ColorPalette.from_hex(hex_list)
-        self.box_annotator = sv.BoxAnnotator(
+        self.bbox_annotator = sv.BoundingBoxAnnotator(
             color=self.color_palette,
             thickness=self.bbox_thickness,
+        )
+        self.label_annotator = sv.LabelAnnotator(
+            color=self.color_palette,
             text_scale=self.label_font_scale,
             text_thickness=self.label_text_thickness,
         )
@@ -518,8 +521,12 @@ class YOLOWorldROS:
                     labels.append(f"{names[idx]} {float(conf):.2f}")
                 else:
                     labels.append("")
-            annotated_frame = self.box_annotator.annotate(
+            annotated_frame = self.bbox_annotator.annotate(
                 scene=cv_image.copy(),
+                detections=detections,
+            )
+            annotated_frame = self.label_annotator.annotate(
+                scene=annotated_frame,
                 detections=detections,
                 labels=labels,
             )
