@@ -82,6 +82,10 @@ class YOLOWorldROS:
         self.bbox_thickness = 2
         self.label_font_scale = 0.6
         self.label_text_thickness = 1
+        # HUD visibility defaults
+        self.show_detector_hud = True
+        self.show_tagger_hud = True
+        self.show_scene_hud = True
 
         # Tagger thread state and latest image buffer
         self.last_image = None
@@ -239,6 +243,10 @@ class YOLOWorldROS:
         self.bbox_thickness = config.bbox_thickness
         self.label_font_scale = config.label_font_scale
         self.label_text_thickness = config.label_text_thickness
+        # HUD visibility params
+        self.show_detector_hud = config.show_detector_hud
+        self.show_tagger_hud = config.show_tagger_hud
+        self.show_scene_hud = config.show_scene_hud
 
         # Recreate annotators with updated settings
         self._rebuild_color_palette()
@@ -531,8 +539,6 @@ class YOLOWorldROS:
                 labels=labels,
             )
 
-            detector_text = f"Detector: {detector_latency_ms:.2f} ms"
-
             # Draw HUD text with Pillow for crisper rendering
             _pil_img = PILImage.fromarray(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
             _draw = ImageDraw.Draw(_pil_img)
@@ -551,8 +557,11 @@ class YOLOWorldROS:
                     _font = ImageFont.load_default()
 
             # Draw detector and tagger text (RGB color)
-            _draw.text((10, 30), detector_text, font=_font, fill=(255, 0, 0))
-            if getattr(self, "prompt_source", None) == 2:
+            if self.show_detector_hud:
+                detector_text = f"Detector: {detector_latency_ms:.2f} ms"
+                _draw.text((10, 30), detector_text, font=_font, fill=(255, 0, 0))
+
+            if getattr(self, "prompt_source", None) == 2 and self.show_tagger_hud:
                 tagger_text = (
                     f"Tagger: {self.last_tagger_latency_ms:.2f} ms"
                     if self.last_tagger_latency_ms is not None
@@ -564,9 +573,11 @@ class YOLOWorldROS:
                     font=_font,
                     fill=(255, 0, 0),
                 )
+
             # Draw scene label at top-right if available
             if (
-                isinstance(getattr(self, "last_scene_text", None), str)
+                self.show_scene_hud
+                and isinstance(getattr(self, "last_scene_text", None), str)
                 and self.last_scene_text.strip() != ""
             ):
                 scene_text = f"scene: {self.last_scene_text}"

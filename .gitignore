@@ -128,6 +128,7 @@ venus_run.sh
 
 # data
 data
+!data/texts/gpt_indoor_general.json
 *input*
 *output*
 
