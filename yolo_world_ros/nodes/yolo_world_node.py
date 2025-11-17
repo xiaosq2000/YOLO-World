@@ -39,13 +39,14 @@ from PIL import ImageDraw, ImageFont
 from sensor_msgs.msg import Image
 from vision_msgs.msg import BoundingBox2D, Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from yolo_world_ros.cfg import YOLOWorldConfig
-from yolo_world_ros.msg import PromptList, PromptPalette
+from yolo_world_ros.msg import LabelSet
 
 
 class YOLOWorldROS:
     """
     A ROS node to perform object detection using the YOLO-World model and publish
-    results as vision_msgs/Detection2DArray.
+    results as vision_msgs/Detection2DArray, along with the current label set
+    and optional color palette for downstream consumers.
     """
 
     def __init__(self):
@@ -71,6 +72,7 @@ class YOLOWorldROS:
         self.text_prompts = None
         self.text_prompt_file = None
         self.prompt_source = None
+        # Internal representation used by the model: list of [text] rows plus a sentinel [" "]
         self.texts = [[" "]]
         self.base_texts = None
         self.auto_texts = None
@@ -93,7 +95,9 @@ class YOLOWorldROS:
         self.tagger_thread = None
         self.tagger_stop_event = threading.Event()
         self.last_tagger_latency_ms = None
-        self.prompt_id = 0
+
+        # Monotonically increasing identifier for label sets / palettes
+        self.label_set_id = 0
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -123,17 +127,16 @@ class YOLOWorldROS:
         )
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
-        self.prompts_pub = rospy.Publisher("prompts", PromptList, queue_size=1, latch=True)
-        self.palette_pub = rospy.Publisher(
-            "prompts_palette", PromptPalette, queue_size=1, latch=True
-        )
+
+        # Unified label set + palette publisher (latched)
+        self.label_set_pub = rospy.Publisher("label_set", LabelSet, queue_size=1, latch=True)
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
-        # Publish initial prompts and palette so latched topics are populated
+        # Publish initial label set so the latched topic is populated
         try:
-            self._publish_prompts(self.texts)
+            self._publish_label_set(self.texts)
         except Exception as e:
-            rospy.logwarn(f"Failed to publish initial prompts/palette: {e}")
+            rospy.logwarn(f"Failed to publish initial label set: {e}")
 
     def reconfigure_callback(self, config, level):
         """
@@ -222,7 +225,7 @@ class YOLOWorldROS:
         if texts_changed:
             try:
                 self.model.reparameterize(self.texts)
-                self._publish_prompts(self.texts)
+                self._publish_label_set(self.texts)
             except Exception as e:
                 rospy.logerr(f"Failed to apply prompts: {e}")
 
@@ -251,12 +254,12 @@ class YOLOWorldROS:
         # Recreate annotators with updated settings
         self._rebuild_color_palette()
 
-        # If only palette changed (and prompts stayed the same), publish updated palette/prompts
+        # If only palette changed (and labels stayed the same), publish updated label set
         if palette_changed and not texts_changed:
             try:
-                self._publish_prompts(self.texts)
+                self._publish_label_set(self.texts)
             except Exception as e:
-                rospy.logerr(f"Failed to publish updated palette: {e}")
+                rospy.logerr(f"Failed to publish updated label set: {e}")
 
         return config
 
@@ -324,21 +327,29 @@ class YOLOWorldROS:
             sleep_t = max(0.0, period - elapsed)
             self.tagger_stop_event.wait(timeout=sleep_t)
 
-    def _publish_prompts(self, texts):
+    def _publish_label_set(self, texts):
+        """
+        Publish the current label set and optional color palette as a single
+        LabelSet message on a latched topic.
+
+        The internal 'texts' structure is a list of [text] rows plus a sentinel
+        [" "]. The sentinel is omitted from the published labels and palette.
+        """
         try:
-            # Increment prompt/palette version id and use a shared timestamp for all palette-related messages
-            self.prompt_id = getattr(self, "prompt_id", 0) + 1
+            # Increment label set version id and use a shared timestamp
+            self.label_set_id = getattr(self, "label_set_id", 0) + 1
             now = rospy.Time.now()
 
-            # Build published prompt list (exclude sentinel " ")
-            pub_prompts = [
+            # Build published label list (exclude sentinel " ")
+            labels = [
                 row[0]
                 for row in texts
                 if isinstance(row, list) and len(row) > 0 and row[0].strip() != ""
             ]
 
-            # Build color palette corresponding to current texts using the same generator as the annotator.
-            # Filter out the sentinel entry to keep indices aligned for consumers.
+            # Build color palette corresponding to current labels using the same
+            # generator as the annotator. Filter out the sentinel entry to keep
+            # indices aligned for consumers.
             n_full = len(texts) if isinstance(texts, list) else 1
             full_hex = self._generate_oklch_palette_hex(n_full)
             colors_hex = []
@@ -354,23 +365,15 @@ class YOLOWorldROS:
                     b = int(hx_clean[4:6], 16)
                     colors_bgr.extend([b, g, r])
 
-            # Publish PromptList (backward compatible)
-            prompts_msg = PromptList()
-            prompts_msg.stamp = now
-            prompts_msg.id = self.prompt_id
-            prompts_msg.prompts = pub_prompts
-            self.prompts_pub.publish(prompts_msg)
-
-            # Publish PromptPalette
-            palette_msg = PromptPalette()
-            palette_msg.stamp = now
-            palette_msg.id = self.prompt_id
-            palette_msg.prompts = pub_prompts
-            palette_msg.colors_hex = colors_hex
-            palette_msg.colors_bgr = colors_bgr
-            self.palette_pub.publish(palette_msg)
+            label_set_msg = LabelSet()
+            label_set_msg.stamp = now
+            label_set_msg.id = self.label_set_id
+            label_set_msg.labels = labels
+            label_set_msg.colors_hex = colors_hex
+            label_set_msg.colors_bgr = colors_bgr
+            self.label_set_pub.publish(label_set_msg)
         except Exception as e:
-            rospy.logwarn_throttle(5.0, f"Failed to publish prompts/palette: {e}")
+            rospy.logwarn_throttle(5.0, f"Failed to publish label set: {e}")
 
     @staticmethod
     def _texts_equal(a, b):
@@ -479,7 +482,7 @@ class YOLOWorldROS:
                     self.model.reparameterize(new_texts)
                     self.texts = new_texts
                     self.auto_texts = new_texts
-                    self._publish_prompts(self.texts)
+                    self._publish_label_set(self.texts)
                     self._rebuild_color_palette()
                 except Exception as e:
                     rospy.logerr(f"Failed to apply auto prompts: {e}")
@@ -608,7 +611,7 @@ class YOLOWorldROS:
         # Create and populate the Detection2DArray message
         detection_array = Detection2DArray()
         detection_array.header = msg.header
-        detection_array.header.frame_id = f"yolo_world_set:{self.prompt_id}"
+        detection_array.header.frame_id = f"yolo_world_set:{self.label_set_id}"
 
         for bbox, label, score in zip(
             pred_instances["bboxes"], pred_instances["labels"], pred_instances["scores"]

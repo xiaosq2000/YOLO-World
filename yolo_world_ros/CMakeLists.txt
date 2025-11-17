@@ -16,8 +16,7 @@ generate_dynamic_reconfigure_options(
 
 add_message_files(
   FILES
-  PromptList.msg
-  PromptPalette.msg
+  LabelSet.msg
 )
 
 generate_messages(
