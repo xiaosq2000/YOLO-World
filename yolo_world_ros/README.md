@@ -8,6 +8,7 @@ This package is intended to live inside the YOLO‑World repository tree and use
 - Publishes: `vision_msgs/Detection2DArray`
 - Publishes (optional): `sensor_msgs/Image` with bounding boxes and labels
 - Publishes: `yolo_world_ros/LabelSet` (current effective labels and optional color palette)
+- Publishes (optional): `~diagnostics` (`diagnostic_msgs/DiagnosticArray`) with detector/tagger latency
 - Dynamic params: prompt source (manual/file/auto), tagger_url/fps/timeout, text prompts, score threshold, top‑k, AMP, visualization, palette and HUD settings
 
 This README reflects the current node implementation in `yolo_world_ros/nodes/yolo_world_node.py`.
@@ -154,6 +155,18 @@ The node uses an OKLCh‑based palette generator to create visually distinct col
 - `show_tagger_hud` (bool): Show tagger latency text when `prompt_source=2`.
 - `show_scene_hud` (bool): Show the `scene:` description from the VLM tagger at the top‑right.
 
+### Diagnostics parameters
+
+- `publish_diagnostics` (bool): Publish diagnostic messages on the private `~diagnostics` topic.
+- `diagnostics_rate_hz` (double): Publish rate in Hz (default 2.0).
+- `diagnostics_stale_sec` (double): Time (s) after which latency is considered stale (default 2.0).
+- `detector_warn_ms` / `detector_error_ms` (double): Thresholds for detector latency.
+- `tagger_warn_ms` / `tagger_error_ms` (double): Thresholds for tagger latency.
+
+Notes:
+- The Tagger diagnostic status is only published when `prompt_source=2` (AUTO).
+- Levels: OK (< warn), WARN (< error), ERROR (>= error), STALE (no recent update).
+
 Changes to prompts (manual, file, or auto) trigger an internal model `reparameterize()` call and a republish of the label set and palette.
 
 ---
@@ -182,6 +195,10 @@ Changes to prompts (manual, file, or auto) trigger an internal model `reparamete
   - Overlay with bounding boxes and `"label score"` text.
   - Uses the OKLCh palette and HUD settings described above.
   - Enabled/disabled via the `visualize` dynamic parameter.
+
+- `~diagnostics` (`diagnostic_msgs/DiagnosticArray`)
+  - Private diagnostics topic containing one `DiagnosticStatus` for the detector and, when enabled, one for the tagger.
+  - Each status reports `latency_ms` and a level (OK/WARN/ERROR/STALE) based on thresholds and staleness.
 
 - `label_set` (`yolo_world_ros/LabelSet`)
   - Unified message that carries both the current labels and an optional color palette.
@@ -364,6 +381,7 @@ The tagger loop runs at up to `tagger_fps` Hz and uses `tagger_timeout` as the H
   - Increase `score_threshold` or lower `top_k` to reduce the number of boxes.
   - Enable `use_amp` on modern GPUs for faster inference.
   - Disable `visualize` if you only need detections; this avoids the cost of drawing overlays.
+  - Enable `publish_diagnostics` to stream detector/tagger latency on `~diagnostics` for monitoring without HUD overlays.
 
 - **Image encoding**
   - Only `bgr8` and `rgb8` are supported.

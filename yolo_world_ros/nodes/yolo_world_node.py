@@ -28,6 +28,7 @@ import requests
 import rospy
 import supervision as sv
 import torch
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from dynamic_reconfigure.server import Server
 from mmdet.apis import init_detector
 from mmdet.utils import get_test_pipeline_cfg
@@ -95,6 +96,11 @@ class YOLOWorldROS:
         self.tagger_thread = None
         self.tagger_stop_event = threading.Event()
         self.last_tagger_latency_ms = None
+        self.last_tagger_stamp = None
+
+        # Detector latency tracking for diagnostics
+        self.last_detector_latency_ms = None
+        self.last_detector_stamp = None
 
         # Monotonically increasing identifier for label sets / palettes
         self.label_set_id = 0
@@ -113,6 +119,12 @@ class YOLOWorldROS:
         self.palette_lightness = 0.62
         self.palette_chroma = 0.18
         self._rebuild_color_palette()
+
+        # Prepare diagnostics publisher/timer state BEFORE dynamic reconfigure (callback runs immediately)
+        self.diagnostics_pub = rospy.Publisher("~diagnostics", DiagnosticArray, queue_size=10)
+        self._diag_timer = None
+        self._diag_enabled = False
+        self._diag_rate_hz = 2.0
 
         # Set up dynamic reconfigure
         self.reconfigure_server = Server(YOLOWorldConfig, self.reconfigure_callback)
@@ -251,6 +263,39 @@ class YOLOWorldROS:
         self.show_tagger_hud = config.show_tagger_hud
         self.show_scene_hud = config.show_scene_hud
 
+        # Diagnostics params
+        diag_enable = bool(config.publish_diagnostics)
+        diag_rate = float(config.diagnostics_rate_hz) if config.diagnostics_rate_hz > 0 else 2.0
+        self.diagnostics_stale_sec = float(config.diagnostics_stale_sec)
+        self.detector_warn_ms = float(config.detector_warn_ms)
+        self.detector_error_ms = float(config.detector_error_ms)
+        self.tagger_warn_ms = float(config.tagger_warn_ms)
+        self.tagger_error_ms = float(config.tagger_error_ms)
+
+        # Start/stop or adjust diagnostics timer based on settings
+        if diag_enable and (not self._diag_enabled or abs(diag_rate - self._diag_rate_hz) > 1e-6):
+            if self._diag_timer is not None:
+                try:
+                    self._diag_timer.shutdown()
+                except Exception:
+                    pass
+            period = max(0.01, 1.0 / max(1e-3, diag_rate))
+            self._diag_timer = rospy.Timer(rospy.Duration(period), self._diagnostics_timer_cb)
+            self._diag_enabled = True
+            self._diag_rate_hz = diag_rate
+            rospy.loginfo_throttle(
+                5.0, f"Diagnostics enabled at {diag_rate:.2f} Hz on ~diagnostics"
+            )
+        elif not diag_enable and self._diag_enabled:
+            if self._diag_timer is not None:
+                try:
+                    self._diag_timer.shutdown()
+                except Exception:
+                    pass
+                self._diag_timer = None
+            self._diag_enabled = False
+            rospy.loginfo_throttle(5.0, "Diagnostics disabled")
+
         # Recreate annotators with updated settings
         self._rebuild_color_palette()
 
@@ -302,6 +347,7 @@ class YOLOWorldROS:
                         if resp.status_code == 200:
                             data = resp.json()
                             self.last_tagger_latency_ms = (time.perf_counter() - t0) * 1000.0
+                            self.last_tagger_stamp = rospy.Time.now()
                             objects = data.get("objects", [])
                             if isinstance(objects, list) and len(objects) > 0:
                                 new_texts = [
@@ -374,6 +420,76 @@ class YOLOWorldROS:
             self.label_set_pub.publish(label_set_msg)
         except Exception as e:
             rospy.logwarn_throttle(5.0, f"Failed to publish label set: {e}")
+
+    def _diagnostics_timer_cb(self, _event):
+        try:
+            now = rospy.Time.now()
+            arr = DiagnosticArray()
+            arr.header.stamp = now
+
+            # Detector status
+            det_stat = DiagnosticStatus()
+            det_stat.name = "yolo_world_ros/Detector"
+            det_stat.hardware_id = str(self.device)
+            # Determine staleness
+            det_stamp = getattr(self, "last_detector_stamp", None)
+            det_lat = getattr(self, "last_detector_latency_ms", None)
+            stale = det_stamp is None or (now - det_stamp).to_sec() > float(
+                getattr(self, "diagnostics_stale_sec", 2.0)
+            )
+            if stale or det_lat is None:
+                det_stat.level = DiagnosticStatus.STALE
+                det_stat.message = "No recent detector update"
+            else:
+                if det_lat < float(self.detector_warn_ms):
+                    det_stat.level = DiagnosticStatus.OK
+                    det_stat.message = "OK"
+                elif det_lat < float(self.detector_error_ms):
+                    det_stat.level = DiagnosticStatus.WARN
+                    det_stat.message = "High latency"
+                else:
+                    det_stat.level = DiagnosticStatus.ERROR
+                    det_stat.message = "Very high latency"
+            kv = KeyValue()
+            kv.key = "latency_ms"
+            kv.value = f"{det_lat:.2f}" if det_lat is not None else "NaN"
+            det_stat.values.append(kv)
+            arr.status.append(det_stat)
+
+            # Tagger status (only if enabled)
+            if getattr(self, "prompt_source", None) == 2:
+                tag_stat = DiagnosticStatus()
+                tag_stat.name = "yolo_world_ros/Tagger"
+                tag_stat.hardware_id = str(self.device)
+                tag_stamp = getattr(self, "last_tagger_stamp", None)
+                tag_lat = getattr(self, "last_tagger_latency_ms", None)
+                stale_t = tag_stamp is None or (now - tag_stamp).to_sec() > float(
+                    getattr(self, "diagnostics_stale_sec", 2.0)
+                )
+                if stale_t or tag_lat is None:
+                    tag_stat.level = DiagnosticStatus.STALE
+                    tag_stat.message = "No recent tagger update"
+                else:
+                    if tag_lat < float(self.tagger_warn_ms):
+                        tag_stat.level = DiagnosticStatus.OK
+                        tag_stat.message = "OK"
+                    elif tag_lat < float(self.tagger_error_ms):
+                        tag_stat.level = DiagnosticStatus.WARN
+                        tag_stat.message = "High latency"
+                    else:
+                        tag_stat.level = DiagnosticStatus.ERROR
+                        tag_stat.message = "Very high latency"
+                kv2 = KeyValue()
+                kv2.key = "latency_ms"
+                kv2.value = f"{tag_lat:.2f}" if tag_lat is not None else "NaN"
+                tag_stat.values.append(kv2)
+                arr.status.append(tag_stat)
+
+            # Publish if we have at least detector status
+            if len(arr.status) > 0:
+                self.diagnostics_pub.publish(arr)
+        except Exception as e:
+            rospy.logwarn_throttle(5.0, f"Diagnostics publish failed: {e}")
 
     @staticmethod
     def _texts_equal(a, b):
@@ -501,6 +617,9 @@ class YOLOWorldROS:
             pred_instances = output.pred_instances
             pred_instances = pred_instances[pred_instances.scores.float() > self.score_threshold]
         detector_latency_ms = (rospy.get_time() - detector_start_t) * 1000
+        # Track detector latency for diagnostics
+        self.last_detector_latency_ms = float(detector_latency_ms)
+        self.last_detector_stamp = rospy.Time.now()
 
         if len(pred_instances.scores) > self.top_k:
             indices = pred_instances.scores.float().topk(self.top_k)[1]

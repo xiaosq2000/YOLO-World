@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
   dynamic_reconfigure
   std_msgs
   message_generation
+  diagnostic_msgs
 )
 
 generate_dynamic_reconfigure_options(
@@ -25,7 +26,7 @@ generate_messages(
 )
 
 catkin_package(
-  CATKIN_DEPENDS message_runtime std_msgs dynamic_reconfigure
+  CATKIN_DEPENDS message_runtime std_msgs dynamic_reconfigure diagnostic_msgs
 )
 
 install(PROGRAMS
