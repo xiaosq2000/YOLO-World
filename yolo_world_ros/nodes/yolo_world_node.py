@@ -400,24 +400,16 @@ class YOLOWorldROS:
             n_full = len(texts) if isinstance(texts, list) else 1
             full_hex = self._generate_oklch_palette_hex(n_full)
             colors_hex = []
-            colors_bgr = []
             for i, row in enumerate(texts if isinstance(texts, list) else []):
                 if isinstance(row, list) and len(row) > 0 and row[0].strip() != "":
                     hx = full_hex[i]
                     colors_hex.append(hx)
-                    # Convert #RRGGBB to BGR uint8 triplet
-                    hx_clean = hx.lstrip("#")
-                    r = int(hx_clean[0:2], 16)
-                    g = int(hx_clean[2:4], 16)
-                    b = int(hx_clean[4:6], 16)
-                    colors_bgr.extend([b, g, r])
 
             label_set_msg = LabelSet()
             label_set_msg.stamp = now
             label_set_msg.id = self.label_set_id
             label_set_msg.labels = labels
             label_set_msg.colors_hex = colors_hex
-            label_set_msg.colors_bgr = colors_bgr
             self.label_set_pub.publish(label_set_msg)
         except Exception as e:
             rospy.logwarn_throttle(5.0, f"Failed to publish label set: {e}")

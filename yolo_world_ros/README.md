@@ -208,7 +208,6 @@ Changes to prompts (manual, file, or auto) trigger an internal model `reparamete
     - `id` (uint32): label set identifier (matches the suffix in `yolo_world_set:<id>`).
     - `labels` (`string[]`): current effective label strings (the internal sentinel `" "` entry is omitted).
     - `colors_hex` (`string[]`): per‑label colors as `#RRGGBB` hex strings. May be empty if no palette is provided.
-    - `colors_bgr` (`uint8[]`): flattened list of BGR triplets `[b0, g0, r0, b1, g1, r1, ...]` aligned with `labels`. May be empty if no palette is provided.
 
 The `label_set` publisher is latched, so new subscribers immediately receive the latest label set and palette.
 
@@ -251,26 +250,27 @@ A common use case is to run a downstream segmentation node that:
   ```
 
 - The palette is optional:
-  - If `colors_hex` and `colors_bgr` are non‑empty and consistent with `labels`, you can use them.
-  - If they are empty, fall back to your own palette.
+  - If `colors_hex` is non‑empty and consistent with `labels`, you can use it.
+  - If it is empty, fall back to your own palette.
 
-- Example: build a list of BGR tuples aligned with `labels`:
+- Example: build a list of BGR tuples aligned with `labels` from `colors_hex`:
 
   ```python
   def build_bgr_palette(label_set_msg: LabelSet):
       n = len(label_set_msg.labels)
-      if len(label_set_msg.colors_bgr) != 3 * n:
+      if len(label_set_msg.colors_hex) != n:
           # Palette missing or inconsistent; return None to signal fallback
           return None
 
-      colors = [
-          (
-              label_set_msg.colors_bgr[3 * i + 0],  # B
-              label_set_msg.colors_bgr[3 * i + 1],  # G
-              label_set_msg.colors_bgr[3 * i + 2],  # R
-          )
-          for i in range(n)
-      ]
+      colors = []
+      for hx in label_set_msg.colors_hex:
+          hx_clean = hx.lstrip("#")
+          if len(hx_clean) != 6:
+              return None
+          r = int(hx_clean[0:2], 16)
+          g = int(hx_clean[2:4], 16)
+          b = int(hx_clean[4:6], 16)
+          colors.append((b, g, r))
       return colors
   ```
 
@@ -312,7 +312,7 @@ This ensures that even if labels change at runtime, detections and segmentation 
 3. On `LabelSet`:
    - Update `current_label_set_id = msg.id`
    - Update `current_labels = msg.labels`
-   - Build `current_colors` from `msg.colors_bgr` (or set to `None` if empty/inconsistent).
+   - Build `current_colors` from `msg.colors_hex` (or set to `None` if empty/inconsistent), for example using the helper shown above.
 
 4. On `Detection2DArray`:
    - Optionally parse `header.frame_id` to extract the label set id and check against `current_label_set_id`.
