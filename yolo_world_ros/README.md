@@ -78,6 +78,7 @@ Parameters (can be overridden on the command line):
 - `input_image_topic`: `sensor_msgs/Image` topic to subscribe (default `/camera/rgb/image_raw`).
 - `output_detections_topic`: `vision_msgs/Detection2DArray` (default `/yolo_world/detections`).
 - `annotated_image_topic`: `sensor_msgs/Image` with overlays (default `/yolo_world/annotated_image`).
+- `label_set_topic`: `yolo_world_ros/LabelSet` topic to publish the current labels and palette (default private `~label_set`; override e.g. to `/yolo_world/label_set`).
 
 Example overrides:
 

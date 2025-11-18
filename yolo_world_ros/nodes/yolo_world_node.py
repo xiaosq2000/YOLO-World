@@ -68,6 +68,7 @@ class YOLOWorldROS:
         annotated_image_topic = rospy.get_param(
             "~annotated_image_topic", "/yolo_world/annotated_image"
         )
+        label_set_topic = rospy.get_param("~label_set_topic", "~label_set")
 
         # Initialize dynamic parameters
         self.text_prompts = None
@@ -141,7 +142,7 @@ class YOLOWorldROS:
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
 
         # Unified label set + palette publisher (latched)
-        self.label_set_pub = rospy.Publisher("label_set", LabelSet, queue_size=1, latch=True)
+        self.label_set_pub = rospy.Publisher(label_set_topic, LabelSet, queue_size=1, latch=True)
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
         # Publish initial label set so the latched topic is populated
