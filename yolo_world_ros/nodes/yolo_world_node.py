@@ -61,14 +61,12 @@ class YOLOWorldROS:
         self.config_file = rospy.get_param("~config_file")
         self.checkpoint_file = rospy.get_param("~checkpoint_file")
         self.device = rospy.get_param("~device", "cuda:0")
-        input_image_topic = rospy.get_param("~input_image_topic", "/camera/rgb/image_raw")
-        output_detections_topic = rospy.get_param(
-            "~output_detections_topic", "/yolo_world/detections"
-        )
+        rgb_image_topic = rospy.get_param("~rgb_image_topic", "rgb/image_raw")
+        detections_topic = rospy.get_param("~detections_topic", "yolo_world/detections")
         annotated_image_topic = rospy.get_param(
-            "~annotated_image_topic", "/yolo_world/annotated_image"
+            "~annotated_image_topic", "yolo_world/annotated_image"
         )
-        label_set_topic = rospy.get_param("~label_set_topic", "~label_set")
+        label_set_topic = rospy.get_param("~label_set_topic", "yolo_world/annotated_image")
 
         # Initialize dynamic parameters
         self.text_prompts = None
@@ -132,11 +130,9 @@ class YOLOWorldROS:
         rospy.on_shutdown(self._stop_tagger_thread)
 
         # Initialize ROS components
-        self.detection_pub = rospy.Publisher(
-            output_detections_topic, Detection2DArray, queue_size=10
-        )
+        self.detection_pub = rospy.Publisher(detections_topic, Detection2DArray, queue_size=10)
         self.image_sub = rospy.Subscriber(
-            input_image_topic, Image, self.image_callback, queue_size=1, buff_size=2**24
+            rgb_image_topic, Image, self.image_callback, queue_size=1, buff_size=2**24
         )
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)

@@ -40,7 +40,7 @@ This README reflects the current node implementation in `yolo_world_ros/nodes/yo
 4. **Launch the node (adjust config and checkpoint if needed)**
 
    ```bash
-   roslaunch yolo_world_ros yolo_world.launch input_image_topic:="$(rostopic list | grep '^/image_publisher_.*image_raw$')"
+   roslaunch yolo_world_ros yolo_world.launch rgb_image_topic:="$(rostopic list | grep '^/image_publisher_.*image_raw$')"
    ```
 
 5. **View results**
@@ -75,8 +75,8 @@ Parameters (can be overridden on the command line):
 - `config_file`: Path to a YOLO‑World config (`.py`). Defaults to a v2_x config under `../configs/pretrain/...`.
 - `checkpoint_file`: Path to model weights (`.pth`) under `../weights/...`.
 - `device`: Inference device string, e.g., `cuda:0` or `cpu`.
-- `input_image_topic`: `sensor_msgs/Image` topic to subscribe (default `/camera/rgb/image_raw`).
-- `output_detections_topic`: `vision_msgs/Detection2DArray` (default `/yolo_world/detections`).
+- `rgb_image_topic`: `sensor_msgs/Image` topic to subscribe (default `/camera/rgb/image_raw`).
+- `detections_topic`: `vision_msgs/Detection2DArray` (default `/yolo_world/detections`).
 - `annotated_image_topic`: `sensor_msgs/Image` with overlays (default `/yolo_world/annotated_image`).
 - `label_set_topic`: `yolo_world_ros/LabelSet` topic to publish the current labels and palette (default private `~label_set`; override e.g. to `/yolo_world/label_set`).
 
@@ -176,13 +176,13 @@ Changes to prompts (manual, file, or auto) trigger an internal model `reparamete
 
 ### Subscribed
 
-- `input_image_topic` (`sensor_msgs/Image`)
+- `rgb_image_topic` (`sensor_msgs/Image`)
   - Only `rgb8` and `bgr8` encodings are supported.
   - If your camera publishes other encodings (e.g., `mono8`, `compressed`), convert or republish to `rgb8`/`bgr8` first.
 
 ### Published
 
-- `output_detections_topic` (`vision_msgs/Detection2DArray`)
+- `detections_topic` (`vision_msgs/Detection2DArray`)
   - `header.frame_id` is set to `yolo_world_set:<label_set_id>` where `<label_set_id>` is a monotonically increasing integer whenever the label set changes.
   - Each `Detection2D` includes:
     - `bbox` (`BoundingBox2D`) in image coordinates:
@@ -361,7 +361,7 @@ You can override this via dynamic reconfigure or by setting the parameter at lau
 When `prompt_source` is set to `AUTO` (2):
 
 - A background thread periodically:
-  - Grabs the latest BGR image received on `input_image_topic`.
+  - Grabs the latest BGR image received on `rgb_image_topic`.
   - JPEG‑encodes it.
   - Sends it as `multipart/form-data` to `tagger_url` with key `"image"`.
 - The tagger is expected to respond with JSON containing at least an `"objects"` list and optionally a `"scene"` string.

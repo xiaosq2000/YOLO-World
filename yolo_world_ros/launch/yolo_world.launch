@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <launch>
-    <arg name="input_image_topic" default="/camera/rgb/image_raw" />
-    <arg name="output_detections_topic" default="/yolo_world/detections" />
-    <arg name="annotated_image_topic" default="/yolo_world/annotated_image" />
-    <arg name="label_set_topic" default="~label_set" />
+    <arg name="rgb_image_topic" default="rgb/image_raw" />
+    <arg name="detections_topic" default="yolo_world/detections" />
+    <arg name="annotated_image_topic" default="yolo_world/annotated_image" />
+    <arg name="label_set_topic" default="yolo_world/label_set" />
     <node name="yolo_world_ros" pkg="yolo_world_ros" type="yolo_world_node.py" output="screen">
         <!-- This launch file assumes that the 'yolo_world_ros' package is located -->
         <!-- at the root of the YOLO-World repository. -->
@@ -18,8 +18,8 @@
         <param name="device" value="cuda:0" />
 
         <!-- Topics -->
-        <param name="input_image_topic" value="$(arg input_image_topic)" />
-        <param name="output_detections_topic" value="$(arg output_detections_topic)" />
+        <param name="rgb_image_topic" value="$(arg rgb_image_topic)" />
+        <param name="detections_topic" value="$(arg detections_topic)" />
         <param name="annotated_image_topic" value="$(arg annotated_image_topic)" />
         <param name="label_set_topic" value="$(arg label_set_topic)" />
     </node>
