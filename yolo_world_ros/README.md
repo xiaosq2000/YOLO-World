@@ -155,6 +155,7 @@ The node uses an OKLCh‑based palette generator to create visually distinct col
 - `show_detector_hud` (bool): Show detector latency text (e.g., `Detector: 12.34 ms`).
 - `show_tagger_hud` (bool): Show tagger latency text when `prompt_source=2`.
 - `show_scene_hud` (bool): Show the `scene:` description from the VLM tagger at the top‑right.
+- `show_zupt_hud` (bool): Show `CACHED` indicator at bottom‑left when ZUPT skips inference and republishes cached results.
 
 ### Diagnostics parameters
 
@@ -169,6 +170,45 @@ Notes:
 - Levels: OK (< warn), WARN (< error), ERROR (>= error), STALE (no recent update).
 
 Changes to prompts (manual, file, or auto) trigger an internal model `reparameterize()` call and a republish of the label set and palette.
+
+### Zero-Update (ZUPT) parameters
+
+The ZUPT feature (inspired by Zero‑velocity Update in SLAM systems) detects when consecutive camera frames are unchanged and skips redundant inference operations. This saves computation when the robot/camera is stationary.
+
+- `zupt_enable` (bool): Enable Zero‑Update to skip inference on unchanged images (default `true`).
+- `zupt_threshold` (double): Mean Absolute Difference (MAD) threshold for change detection (default `3.0`).
+  - `0` = identical images only
+  - `3.0` = conservative, low sensor noise (recommended default)
+  - `5.0–10.0` = moderate noise tolerance
+  - Higher values skip more frames but may miss small changes.
+- `zupt_min_interval_sec` (double): Force inference after this interval even if unchanged (default `10.0`).
+- `zupt_downscale_size` (int): Downsampled comparison image size NxN (default `64`). Smaller values are faster.
+- `zupt_republish_cached` (bool): Republish cached detections when skipping inference (default `true`).
+  - When `true`, downstream nodes continue receiving detection messages with updated timestamps.
+  - When `false`, no messages are published during skipped frames.
+
+**How it works:**
+
+1. Each frame is downsampled to a small grayscale image (e.g., 64×64).
+2. Mean Absolute Difference (MAD) is computed against the reference frame.
+3. If MAD ≤ threshold, inference is skipped and cached results are republished.
+4. If MAD > threshold or `min_interval_sec` has elapsed, full inference runs.
+5. The tagger thread also uses ZUPT to skip expensive VLM HTTP requests when images are unchanged.
+
+**Diagnostics:**
+
+When `publish_diagnostics` is enabled, ZUPT status is included in `~diagnostics`:
+
+- `skip_rate_percent`: Percentage of frames skipped.
+- `frames_skipped` / `frames_total`: Frame counters.
+- `last_similarity_score`: MAD score from the most recent comparison.
+- `tagger_requests_skipped`: Number of tagger HTTP requests skipped (when `prompt_source=2`).
+
+**Use cases:**
+
+- **Static robot/camera**: When the agent is stationary (e.g., planning, waiting), ZUPT avoids redundant GPU inference.
+- **Compute-limited systems**: Reduce GPU load during static periods.
+- **VLM tagger cost**: Skipping tagger HTTP requests saves bandwidth and VLM compute costs.
 
 ---
 

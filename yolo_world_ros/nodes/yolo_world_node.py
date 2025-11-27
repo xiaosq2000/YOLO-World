@@ -16,10 +16,12 @@
 # limitations under the License.
 #
 
+import copy
 import json
 import os
 import threading
 import time
+from typing import Tuple
 
 import cv2
 import git
@@ -88,6 +90,7 @@ class YOLOWorldROS:
         self.show_detector_hud = True
         self.show_tagger_hud = True
         self.show_scene_hud = True
+        self.show_zupt_hud = True
 
         # Tagger thread state and latest image buffer
         self.last_image = None
@@ -103,6 +106,21 @@ class YOLOWorldROS:
 
         # Monotonically increasing identifier for label sets / palettes
         self.label_set_id = 0
+
+        # Zero-Update (ZUPT) state - skip inference when image is unchanged
+        self.zupt_reference_image: np.ndarray | None = None
+        self.zupt_reference_image_lock = threading.Lock()
+        self.zupt_cached_detections: Detection2DArray | None = None
+        self.zupt_cached_annotated_image: Image | None = None
+        self.zupt_cached_label_set_id: int = 0
+        self.zupt_last_inference_time: float = 0.0
+        # ZUPT statistics
+        self.zupt_frames_skipped: int = 0
+        self.zupt_frames_total: int = 0
+        self.zupt_last_similarity_score: float = 0.0
+        # ZUPT tagger-specific state
+        self.zupt_tagger_reference_image: np.ndarray | None = None
+        self.zupt_tagger_requests_skipped: int = 0
 
         # Load model configuration
         cfg = Config.fromfile(self.config_file)
@@ -259,6 +277,7 @@ class YOLOWorldROS:
         self.show_detector_hud = config.show_detector_hud
         self.show_tagger_hud = config.show_tagger_hud
         self.show_scene_hud = config.show_scene_hud
+        self.show_zupt_hud = config.show_zupt_hud
 
         # Diagnostics params
         diag_enable = bool(config.publish_diagnostics)
@@ -268,6 +287,13 @@ class YOLOWorldROS:
         self.detector_error_ms = float(config.detector_error_ms)
         self.tagger_warn_ms = float(config.tagger_warn_ms)
         self.tagger_error_ms = float(config.tagger_error_ms)
+
+        # ZUPT params
+        self.zupt_enable = bool(config.zupt_enable)
+        self.zupt_threshold = float(config.zupt_threshold)
+        self.zupt_min_interval_sec = float(config.zupt_min_interval_sec)
+        self.zupt_downscale_size = int(config.zupt_downscale_size)
+        self.zupt_republish_cached = bool(config.zupt_republish_cached)
 
         # Start/stop or adjust diagnostics timer based on settings
         if diag_enable and (not self._diag_enabled or abs(diag_rate - self._diag_rate_hz) > 1e-6):
@@ -333,6 +359,30 @@ class YOLOWorldROS:
                 if self.last_image is not None:
                     img = self.last_image.copy()
             if img is not None and getattr(self, "prompt_source", None) == 2:
+                # ZUPT: Check if image is unchanged to skip expensive tagger request
+                should_skip_tagger = False
+                if getattr(self, "zupt_enable", False):
+                    if self.zupt_tagger_reference_image is not None:
+                        score = self._compute_image_similarity(
+                            self.zupt_tagger_reference_image, img
+                        )
+                        threshold = getattr(self, "zupt_threshold", 3.0)
+                        if score <= threshold:
+                            should_skip_tagger = True
+                            self.zupt_tagger_requests_skipped += 1
+                            rospy.logdebug_throttle(10.0, f"ZUPT: skip tagger (score={score:.1f})")
+
+                if should_skip_tagger:
+                    # Skip tagger request, sleep and continue
+                    period = 1.0 / max(1e-6, getattr(self, "tagger_fps", 1.0))
+                    elapsed = time.time() - start
+                    sleep_t = max(0.0, period - elapsed)
+                    self.tagger_stop_event.wait(timeout=sleep_t)
+                    continue
+
+                # Update tagger reference image
+                self.zupt_tagger_reference_image = img.copy()
+
                 try:
                     t0 = time.perf_counter()
                     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
@@ -474,6 +524,47 @@ class YOLOWorldROS:
                 tag_stat.values.append(kv2)
                 arr.status.append(tag_stat)
 
+            # ZUPT status (only if enabled)
+            if getattr(self, "zupt_enable", False):
+                zupt_stat = DiagnosticStatus()
+                zupt_stat.name = "yolo_world_ros/ZeroUpdate"
+                zupt_stat.hardware_id = str(self.device)
+                zupt_stat.level = DiagnosticStatus.OK
+                zupt_stat.message = "Active"
+
+                total = getattr(self, "zupt_frames_total", 0)
+                skipped = getattr(self, "zupt_frames_skipped", 0)
+                skip_rate = (skipped / total * 100.0) if total > 0 else 0.0
+
+                kv_skip_rate = KeyValue()
+                kv_skip_rate.key = "skip_rate_percent"
+                kv_skip_rate.value = f"{skip_rate:.1f}"
+                zupt_stat.values.append(kv_skip_rate)
+
+                kv_skipped = KeyValue()
+                kv_skipped.key = "frames_skipped"
+                kv_skipped.value = str(skipped)
+                zupt_stat.values.append(kv_skipped)
+
+                kv_total = KeyValue()
+                kv_total.key = "frames_total"
+                kv_total.value = str(total)
+                zupt_stat.values.append(kv_total)
+
+                kv_score = KeyValue()
+                kv_score.key = "last_similarity_score"
+                kv_score.value = f"{getattr(self, 'zupt_last_similarity_score', 0.0):.2f}"
+                zupt_stat.values.append(kv_score)
+
+                # Tagger skip stats (if auto mode)
+                if getattr(self, "prompt_source", None) == 2:
+                    kv_tagger_skipped = KeyValue()
+                    kv_tagger_skipped.key = "tagger_requests_skipped"
+                    kv_tagger_skipped.value = str(getattr(self, "zupt_tagger_requests_skipped", 0))
+                    zupt_stat.values.append(kv_tagger_skipped)
+
+                arr.status.append(zupt_stat)
+
             # Publish if we have at least detector status
             if len(arr.status) > 0:
                 self.diagnostics_pub.publish(arr)
@@ -486,6 +577,126 @@ class YOLOWorldROS:
             return a == b
         except Exception:
             return False
+
+    # Zero-Update (ZUPT) helper methods
+    def _compute_image_similarity(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """
+        Compute Mean Absolute Difference (MAD) on downsampled grayscale images.
+
+        Args:
+            img1: First BGR image
+            img2: Second BGR image
+
+        Returns:
+            MAD score (0 = identical, higher = more different)
+        """
+        size = getattr(self, "zupt_downscale_size", 64)
+        gray1 = cv2.resize(cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY), (size, size))
+        gray2 = cv2.resize(cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY), (size, size))
+        return float(np.mean(np.abs(gray1.astype(np.float32) - gray2.astype(np.float32))))
+
+    def _should_skip_inference(self, cv_image: np.ndarray) -> Tuple[bool, str]:
+        """
+        Check if inference should be skipped due to image stationarity.
+
+        Args:
+            cv_image: Current BGR image
+
+        Returns:
+            Tuple of (should_skip, reason_string)
+        """
+        if not getattr(self, "zupt_enable", False):
+            return False, "disabled"
+
+        with self.zupt_reference_image_lock:
+            ref = self.zupt_reference_image
+
+        if ref is None:
+            return False, "no_reference"
+
+        # Invalidate cache on label set change
+        if self.zupt_cached_label_set_id != self.label_set_id:
+            return False, "label_set_changed"
+
+        # Force periodic inference after min_interval
+        elapsed = time.time() - self.zupt_last_inference_time
+        if elapsed >= getattr(self, "zupt_min_interval_sec", 1.0):
+            return False, "min_interval"
+
+        # No cached results to republish
+        if self.zupt_cached_detections is None:
+            return False, "no_cache"
+
+        # Compute similarity
+        score = self._compute_image_similarity(ref, cv_image)
+        self.zupt_last_similarity_score = score
+
+        threshold = getattr(self, "zupt_threshold", 3.0)
+        if score <= threshold:
+            return True, f"stationary({score:.1f})"
+        return False, f"changed({score:.1f})"
+
+    def _draw_zupt_indicator(self, cached_img_msg: Image, header) -> Image:
+        """
+        Draw ZUPT indicator on a cached annotated image.
+
+        Args:
+            cached_img_msg: Cached sensor_msgs/Image to annotate
+            header: New header to apply to the output message
+
+        Returns:
+            New Image message with ZUPT indicator drawn (if show_zupt_hud is True)
+        """
+        if not getattr(self, "show_zupt_hud", True):
+            # Just update header without drawing
+            out_msg = copy.deepcopy(cached_img_msg)
+            out_msg.header = header
+            return out_msg
+
+        # Decode cached image
+        img_data = np.frombuffer(cached_img_msg.data, dtype=np.uint8).reshape(
+            cached_img_msg.height, cached_img_msg.width, -1
+        )
+        frame = img_data.copy()
+
+        # Draw ZUPT indicator using Pillow
+        pil_img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+
+        font_size = max(10, int(18 * self.hud_font_scale))
+        font = None
+        if os.path.isfile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+        else:
+            try:
+                font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+
+        # Draw "CACHED" indicator at bottom-left in yellow
+        zupt_text = "CACHED"
+        try:
+            bbox = draw.textbbox((0, 0), zupt_text, font=font)
+            text_h = bbox[3] - bbox[1]
+        except Exception:
+            _, text_h = draw.textsize(zupt_text, font=font)
+        x = 10
+        y = pil_img.height - text_h - 10
+        draw.text((x, y), zupt_text, font=font, fill=(255, 255, 0))
+
+        # Convert back to BGR
+        annotated_frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+        # Create output Image message
+        out_msg = Image()
+        out_msg.header = header
+        out_msg.height = annotated_frame.shape[0]
+        out_msg.width = annotated_frame.shape[1]
+        out_msg.encoding = "bgr8"
+        out_msg.is_bigendian = 0
+        out_msg.step = annotated_frame.shape[1] * 3
+        out_msg.data = annotated_frame.tobytes()
+        return out_msg
 
     # OKLCh-based color palette generation
     def _oklch_to_linear_srgb(self, L, C, h_deg):
@@ -591,6 +802,34 @@ class YOLOWorldROS:
                     self._rebuild_color_palette()
                 except Exception as e:
                     rospy.logerr(f"Failed to apply auto prompts: {e}")
+
+        # ZUPT: Check for image stationarity before inference
+        self.zupt_frames_total += 1
+        should_skip, skip_reason = self._should_skip_inference(cv_image)
+
+        if should_skip:
+            self.zupt_frames_skipped += 1
+            rospy.logdebug_throttle(5.0, f"ZUPT: skip ({skip_reason})")
+
+            if getattr(self, "zupt_republish_cached", True) and self.zupt_cached_detections:
+                # Republish cached detections with updated timestamp
+                cached_det = copy.deepcopy(self.zupt_cached_detections)
+                cached_det.header = msg.header
+                cached_det.header.frame_id = f"yolo_world_set:{self.label_set_id}"
+                self.detection_pub.publish(cached_det)
+
+                # Republish cached annotated image if visualization enabled
+                if self.visualize and self.zupt_cached_annotated_image is not None:
+                    cached_img = self._draw_zupt_indicator(
+                        self.zupt_cached_annotated_image, msg.header
+                    )
+                    self.annotated_image_pub.publish(cached_img)
+            return
+
+        # Update reference image for next comparison
+        with self.zupt_reference_image_lock:
+            self.zupt_reference_image = cv_image.copy()
+        self.zupt_last_inference_time = time.time()
 
         # Prepare data for the model
         data_info = dict(img=cv_image, texts=self.texts)
@@ -745,6 +984,13 @@ class YOLOWorldROS:
             detection_array.detections.append(detection)
 
         self.detection_pub.publish(detection_array)
+
+        # ZUPT: Cache results for potential reuse when skipping inference
+        if getattr(self, "zupt_enable", False):
+            self.zupt_cached_detections = copy.deepcopy(detection_array)
+            self.zupt_cached_label_set_id = self.label_set_id
+            if self.visualize:
+                self.zupt_cached_annotated_image = copy.deepcopy(annotated_image_msg)
 
 
 if __name__ == "__main__":
