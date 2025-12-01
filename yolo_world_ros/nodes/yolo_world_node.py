@@ -67,7 +67,7 @@ class YOLOWorldROS:
         annotated_image_topic = rospy.get_param(
             "~annotated_image_topic", "yolo_world/annotated_image"
         )
-        label_set_topic = rospy.get_param("~label_set_topic", "yolo_world/annotated_image")
+        label_set_topic = rospy.get_param("~label_set_topic", "yolo_world/label_set")
 
         # Initialize dynamic parameters
         self.text_prompts = None
@@ -139,18 +139,18 @@ class YOLOWorldROS:
         # Initialize ROS components
         self.detection_pub = rospy.Publisher(detections_topic, Detection2DArray, queue_size=10)
         self.image_sub = rospy.Subscriber(
-            rgb_image_topic, Image, self.image_callback, queue_size=1, buff_size=2**24
+            rgb_image_topic, Image, self.image_callback, queue_size=10, buff_size=2**24
         )
 
         self.annotated_image_pub = rospy.Publisher(annotated_image_topic, Image, queue_size=10)
 
-        # Unified label set + palette publisher (latched)
-        self.label_set_pub = rospy.Publisher(label_set_topic, LabelSet, queue_size=1, latch=True)
+        # Unified label set + palette publisher (non-latched)
+        self.label_set_pub = rospy.Publisher(label_set_topic, LabelSet, queue_size=10)
 
         rospy.loginfo("YOLO-World ROS node initialized successfully.")
-        # Publish initial label set so the latched topic is populated
+        # Publish initial label set with an empty header (no associated image yet)
         try:
-            self._publish_label_set(self.texts)
+            self._publish_label_set(self.texts, header=None)
         except Exception as e:
             rospy.logwarn(f"Failed to publish initial label set: {e}")
 
@@ -241,7 +241,8 @@ class YOLOWorldROS:
         if texts_changed:
             try:
                 self.model.reparameterize(self.texts)
-                self._publish_label_set(self.texts)
+                # No image header available here; publish with empty header
+                self._publish_label_set(self.texts, header=None)
             except Exception as e:
                 rospy.logerr(f"Failed to apply prompts: {e}")
 
@@ -281,7 +282,8 @@ class YOLOWorldROS:
         # If only palette changed (and labels stayed the same), publish updated label set
         if palette_changed and not texts_changed:
             try:
-                self._publish_label_set(self.texts)
+                # No image header available here; publish with empty header
+                self._publish_label_set(self.texts, header=None)
             except Exception as e:
                 rospy.logerr(f"Failed to publish updated label set: {e}")
 
@@ -376,18 +378,23 @@ class YOLOWorldROS:
             sleep_t = max(0.0, period - elapsed)
             self.tagger_stop_event.wait(timeout=sleep_t)
 
-    def _publish_label_set(self, texts):
+    def _publish_label_set(self, texts, header):
         """
         Publish the current label set and optional color palette as a single
-        LabelSet message on a latched topic.
+        LabelSet message.
 
         The internal 'texts' structure is a list of [text] rows plus a sentinel
         [" "]. The sentinel is omitted from the published labels and palette.
+
+        Args:
+            texts: Internal texts structure.
+            header: A std_msgs/Header (typically from the input RGB image) whose
+                    stamp and frame_id will be copied into the LabelSet header.
+                    If None, an empty header is used.
         """
         try:
-            # Increment label set version id and use a shared timestamp
+            # Increment label set version id
             self.label_set_id = getattr(self, "label_set_id", 0) + 1
-            now = rospy.Time.now()
 
             # Build published label list (exclude sentinel " ")
             labels = [
@@ -408,7 +415,12 @@ class YOLOWorldROS:
                     colors_hex.append(hx)
 
             label_set_msg = LabelSet()
-            label_set_msg.stamp = now
+            if header is not None:
+                label_set_msg.header = header
+            else:
+                # Fallback: empty header
+                label_set_msg.header.stamp = rospy.Time.now()
+                label_set_msg.header.frame_id = ""
             label_set_msg.id = self.label_set_id
             label_set_msg.labels = labels
             label_set_msg.colors_hex = colors_hex
@@ -643,7 +655,8 @@ class YOLOWorldROS:
                     self.model.reparameterize(new_texts)
                     self.texts = new_texts
                     self.auto_texts = new_texts
-                    self._publish_label_set(self.texts)
+                    # Publish label set using the same header as the input RGB image
+                    self._publish_label_set(self.texts, header=msg.header)
                     self._rebuild_color_palette()
                 except Exception as e:
                     rospy.logerr(f"Failed to apply auto prompts: {e}")
